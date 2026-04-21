@@ -1,0 +1,40 @@
+# Lefthook config. Global hook runner installed at ~/.git-hooks/ reads this.
+# Run hooks manually: `lefthook run pre-commit --all-files`
+# Skip once: `LEFTHOOK=0 git commit ...` (discouraged — CI will catch it).
+
+pre-commit:
+  parallel: true
+  commands:
+
+    ruff-check:
+      glob: "*.py"
+      run: uv run ruff check --fix --exit-non-zero-on-fix {staged_files}
+      stage_fixed: true
+
+    ruff-format:
+      glob: "*.py"
+      run: uv run ruff format {staged_files}
+      stage_fixed: true
+
+    mypy:
+      glob: "{daemon,app,menubar,protocol}/src/**/*.py"
+      run: uv run mypy --strict {staged_files}
+
+    bandit:
+      glob: "{daemon,app,menubar,protocol}/src/**/*.py"
+      run: uv run bandit -ll {staged_files}
+
+    gitleaks-staged:
+      run: gitleaks protect --staged --redact --no-banner
+
+pre-push:
+  commands:
+
+    mypy-full:
+      # Whole-project strict pass; cheap for a small repo, catches cross-file
+      # errors that per-file staged runs miss.
+      run: uv run mypy --strict daemon/src app/src menubar/src protocol/src
+
+    gitleaks-history:
+      # Scans history on push to catch anything that slipped past pre-commit.
+      run: gitleaks detect --redact --no-banner

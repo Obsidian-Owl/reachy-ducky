@@ -12,7 +12,7 @@
       "Bash(ruff:*)",
       "Bash(mypy:*)",
       "Bash(bandit:*)",
-      "Bash(pre-commit:*)",
+      "Bash(lefthook:*)",
       "Bash(pip-audit:*)",
       "Bash(git status)",
       "Bash(git status:*)",
@@ -120,7 +120,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "printf '→ Before claiming done: run `uv run pytest -q` and `uv run pre-commit run --all-files`. Verify output.\\n' >&2"
+            "command": "printf '→ Before claiming done: run `uv run pytest -q` and `lefthook run pre-commit --all-files`. Verify output.\\n' >&2"
           }
         ]
       }

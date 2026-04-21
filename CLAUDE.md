@@ -13,7 +13,7 @@ uv run ruff check --fix .   # lint + autofix
 uv run ruff format .        # format
 uv run mypy --strict daemon/src app/src menubar/src protocol/src
 uv run bandit -r daemon/src app/src menubar/src protocol/src -ll
-uv run pre-commit run --all-files
+lefthook run pre-commit --all-files
 npx gitnexus analyze --skip-agents-md   # refresh code index (incremental by default)
 ```
 
