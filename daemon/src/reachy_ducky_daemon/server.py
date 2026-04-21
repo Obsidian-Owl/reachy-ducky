@@ -11,7 +11,7 @@ import hmac
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from reachy_ducky_protocol.messages import HealthResponse
+from reachy_ducky_protocol.messages import BrainRequest, BrainResponse, HealthResponse
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
@@ -65,6 +65,10 @@ def create_app(
             brain=type(brain).__name__,
             memory_ready=(memory_root / "ducky" / "soul.md").exists(),
         )
+
+    @app.post("/brain/query", response_model=BrainResponse)
+    async def brain_query(req: BrainRequest) -> BrainResponse:
+        return await brain.query(req)
 
     return app
 
