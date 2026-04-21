@@ -1,0 +1,17 @@
+[tool.uv.workspace]
+members = ["daemon", "app", "menubar", "protocol"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["daemon/tests", "app/tests", "menubar/tests", "protocol/tests"]
+asyncio_mode = "auto"
+markers = [
+    "hardware: requires Reachy Mini hardware",
+    "integration: requires live external APIs",
+]

@@ -1,0 +1,24 @@
+[project]
+name = "reachy-ducky-menubar"
+version = "0.0.1"
+requires-python = ">=3.12"
+dependencies = ["reachy-ducky-protocol", "httpx>=0.27,<0.29"]
+
+# rumps is macOS-only; install in an extra so non-Darwin CI can still resolve
+# the workspace. Code that imports rumps must itself be guarded (see Task 7).
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "ruff>=0.6,<0.8", "mypy>=1.11,<1.15"]
+macos = ["rumps>=0.4,<0.5"]
+
+[project.scripts]
+reachy-ducky-menubar = "reachy_ducky_menubar.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reachy_ducky_menubar"]
+
+[tool.uv.sources]
+reachy-ducky-protocol = { workspace = true }
