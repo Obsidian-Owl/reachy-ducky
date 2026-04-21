@@ -107,9 +107,13 @@ class ClaudeSDKBrain(BrainInterface):
         otherwise synthesises the minimal text-stream shape from
         ``system_prompt`` / ``model``.
         """
-        options = self._prebuilt_options or ClaudeAgentOptions(
-            system_prompt=self._system_prompt,
-            model=self._model,
+        options = (
+            self._prebuilt_options
+            if self._prebuilt_options is not None
+            else ClaudeAgentOptions(
+                system_prompt=self._system_prompt,
+                model=self._model,
+            )
         )
         parts: list[str] = []
         async for chunk in sdk_query(prompt=request.user_utterance, options=options):

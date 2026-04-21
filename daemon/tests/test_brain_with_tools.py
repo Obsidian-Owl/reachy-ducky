@@ -59,7 +59,8 @@ async def test_with_tools_with_github_repo_includes_github_tools(tmp_path: Path)
     """Passing ``github_repo`` wires the github-mcp-server + allows its tool glob."""
     seen: dict[str, Any] = {}
 
-    async def fake_query(prompt: str, options: Any) -> AsyncIterator[dict[str, Any]]:  # noqa: ARG001
+    async def fake_query(prompt: str, options: Any) -> AsyncIterator[dict[str, Any]]:
+        seen["prompt"] = prompt
         seen["options"] = options
         yield {"type": "text", "text": ""}
 
@@ -87,7 +88,8 @@ async def test_classic_constructor_still_works(tmp_path: Path) -> None:
     _ = tmp_path  # keep the pytest fixture pattern consistent with the other tests
     seen: dict[str, Any] = {}
 
-    async def fake_query(prompt: str, options: Any) -> AsyncIterator[dict[str, Any]]:  # noqa: ARG001
+    async def fake_query(prompt: str, options: Any) -> AsyncIterator[dict[str, Any]]:
+        seen["prompt"] = prompt
         seen["options"] = options
         yield {"type": "text", "text": "classic ok"}
 
@@ -112,7 +114,8 @@ async def test_with_tools_passes_custom_system_prompt(tmp_path: Path) -> None:
     custom = "You are a specialized test observer."
     seen: dict[str, Any] = {}
 
-    async def fake_query(prompt: str, options: Any) -> AsyncIterator[dict[str, Any]]:  # noqa: ARG001
+    async def fake_query(prompt: str, options: Any) -> AsyncIterator[dict[str, Any]]:
+        seen["prompt"] = prompt
         seen["options"] = options
         yield {"type": "text", "text": ""}
 
@@ -132,7 +135,8 @@ async def test_with_tools_passes_custom_model(tmp_path: Path) -> None:
     """Caller-provided ``model`` flows through ``with_tools``."""
     seen: dict[str, Any] = {}
 
-    async def fake_query(prompt: str, options: Any) -> AsyncIterator[dict[str, Any]]:  # noqa: ARG001
+    async def fake_query(prompt: str, options: Any) -> AsyncIterator[dict[str, Any]]:
+        seen["prompt"] = prompt
         seen["options"] = options
         yield {"type": "text", "text": ""}
 
