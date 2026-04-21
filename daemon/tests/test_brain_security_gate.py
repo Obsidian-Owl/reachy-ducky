@@ -80,6 +80,18 @@ BASH_CASES: list[tuple[str, bool, str]] = [
     ("echo hi", False, "unrelated command rejected"),
     ("gitfoo status", False, "prefix-looks-like-git still rejected"),
     ("", False, "empty command rejected"),
+    # C3 — file-write / redirection / background primitives
+    ("git log > /tmp/out", False, "stdout redirection rejected"),
+    ("git log >> /tmp/out", False, "stdout append redirection rejected"),
+    ("git log < /tmp/in", False, "stdin redirection rejected"),
+    ("git log 2>&1", False, "stderr redirection rejected"),
+    ("git log &", False, "trailing background rejected"),
+    ("git log\nrm -rf /", False, "embedded newline rejected"),
+    # I3 — Unicode whitespace lock-in
+    ("git status\u200b", False, "trailing zero-width space rejected"),
+    ("git\u200bstatus", False, "zero-width space between git and subcommand rejected"),
+    ("git\u00a0status", True, "non-breaking space treated as whitespace"),
+    ("git\u3000status", True, "ideographic space treated as whitespace"),
 ]
 
 
@@ -125,6 +137,13 @@ PATH_CASES: list[tuple[str, bool, str]] = [
     ("credentials.json", False, "credentials.json"),
     ("credentials", False, "bare credentials"),
     ("src/notes/credentials", False, "credentials basename in subdir"),
+    # C2 — case-insensitive matching (macOS APFS default)
+    (".ENV", False, "uppercase .ENV matches .env on case-insensitive fs"),
+    (".Env.local", False, "mixed-case .Env.local matches .env.*"),
+    ("ID_RSA", False, "uppercase ID_RSA matches id_rsa*"),
+    ("Credentials.json", False, "mixed-case Credentials.json matches credentials*"),
+    ("SECRETS/foo", False, "uppercase SECRETS directory matches secrets/**"),
+    ("API.PEM", False, "uppercase API.PEM matches *.pem"),
 ]
 
 
@@ -183,6 +202,124 @@ async def test_grep_path_gate(path: str, should_allow: bool, label: str) -> None
         assert not _is_deny(dict(result)), f"expected allow, got deny for path: {path!r}"
     else:
         assert _is_deny(dict(result)), f"expected deny, got allow for path: {path!r}"
+
+
+GLOB_PATTERN_CASES: list[tuple[str, bool, str]] = [
+    # (pattern, should_allow, case_label)
+    ("**/*.py", True, "Glob python files"),
+    ("docs/**/*.md", True, "Glob docs markdown"),
+    ("src/**/test_*.py", True, "Glob test files"),
+    ("**/*.env", False, "Glob .env files (substring heuristic)"),
+    ("**/id_rsa*", False, "Glob id_rsa (substring heuristic)"),
+    ("secrets/**/*.yaml", False, "Glob secrets tree (substring heuristic)"),
+    ("*.pem", False, "Glob *.pem (substring heuristic)"),
+    ("**/.KEY", False, "Glob uppercase .KEY (case-insensitive substring)"),
+    ("**/*Credential*", False, "Glob mixed-case Credential (case-insensitive substring)"),
+]
+
+
+@pytest.mark.parametrize(
+    ("pattern", "should_allow", "label"),
+    GLOB_PATTERN_CASES,
+    ids=[case[2] for case in GLOB_PATTERN_CASES],
+)
+async def test_glob_pattern_gate(pattern: str, should_allow: bool, label: str) -> None:
+    """Glob patterns are screened by substring heuristic for secret-suggesting tokens."""
+    _ = label
+    result = await security_gate(
+        _make_input("Glob", {"pattern": pattern}),
+        None,
+        _context(),
+    )
+    if should_allow:
+        assert not _is_deny(dict(result)), f"expected allow, got deny for Glob pattern: {pattern!r}"
+    else:
+        assert _is_deny(dict(result)), f"expected deny, got allow for Glob pattern: {pattern!r}"
+
+
+async def test_glob_pattern_deny_reason_names_needle() -> None:
+    """Glob pattern deny reason surfaces the matched substring so Claude can correct course."""
+    result = await security_gate(
+        _make_input("Glob", {"pattern": "**/*.env"}),
+        None,
+        _context(),
+    )
+    hook_specific = dict(result).get("hookSpecificOutput")
+    assert isinstance(hook_specific, dict)
+    reason = hook_specific.get("permissionDecisionReason", "")
+    assert isinstance(reason, str)
+    assert ".env" in reason
+
+
+async def test_grep_content_pattern_not_filename_screened() -> None:
+    """Grep `pattern` is a content regex — leave it alone (path still screened).
+
+    Over-restricting Grep's content pattern risks false positives on legitimate
+    searches for secrets-related code (e.g., hunting down accidental commits).
+    The path field is still guarded by the existing _path_is_secret check.
+    """
+    result = await security_gate(
+        _make_input("Grep", {"pattern": "AKIA[A-Z0-9]{16}", "path": "/tmp"}),
+        None,
+        _context(),
+    )
+    assert not _is_deny(dict(result))
+
+
+# I2 — malformed input shape lock-in
+MALFORMED_BASH_CASES: list[tuple[dict[str, Any], str]] = [
+    ({"command": None}, "None command denied"),
+    ({"command": ["git", "log"]}, "list command denied"),
+    ({"command": 42}, "int command denied"),
+]
+
+
+@pytest.mark.parametrize(
+    ("tool_input", "label"),
+    MALFORMED_BASH_CASES,
+    ids=[case[1] for case in MALFORMED_BASH_CASES],
+)
+async def test_bash_malformed_command_denied(tool_input: dict[str, Any], label: str) -> None:
+    """Non-string Bash commands are normalized to empty and denied (no crash)."""
+    _ = label
+    result = await security_gate(
+        _make_input("Bash", tool_input),
+        None,
+        _context(),
+    )
+    assert _is_deny(dict(result))
+
+
+MALFORMED_READ_CASES: list[tuple[dict[str, Any], str]] = [
+    ({"file_path": 42}, "int file_path passes through"),
+    ({"file_path": None}, "None file_path passes through"),
+]
+
+
+@pytest.mark.parametrize(
+    ("tool_input", "label"),
+    MALFORMED_READ_CASES,
+    ids=[case[1] for case in MALFORMED_READ_CASES],
+)
+async def test_read_malformed_path_passes_through(tool_input: dict[str, Any], label: str) -> None:
+    """Non-string Read paths pass through — SDK rejects at the tool boundary."""
+    _ = label
+    result = await security_gate(
+        _make_input("Read", tool_input),
+        None,
+        _context(),
+    )
+    assert not _is_deny(dict(result))
+
+
+async def test_glob_malformed_pattern_passes_through() -> None:
+    """Non-string Glob pattern is skipped by the heuristic (SDK rejects shape)."""
+    result = await security_gate(
+        _make_input("Glob", {"pattern": None}),
+        None,
+        _context(),
+    )
+    assert not _is_deny(dict(result))
 
 
 async def test_webfetch_pass_through() -> None:

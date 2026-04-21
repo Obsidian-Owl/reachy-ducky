@@ -5,10 +5,12 @@ This module exports :func:`security_gate`, an async callback matching the SDK's
 ``HookCallback`` signature, that enforces two rules at the tool boundary:
 
 1. ``Bash`` — allow only a fixed set of read-only ``git`` subcommands, with no
-   shell compounding (``;``, ``&&``, ``||``, pipes, subshells, backticks).
+   shell compounding (``;``, ``&&``, ``||``, pipes, subshells, backticks,
+   redirections, background, embedded newline).
 2. ``Read`` / ``Glob`` / ``Grep`` — reject any ``file_path`` / ``path`` /
    ``pattern`` matching the secret-glob blocklist, checked against both the
-   basename and the full relative path.
+   basename and the full relative path. For ``Glob``, also screen the
+   ``pattern`` field with a substring heuristic for secret-suggesting tokens.
 
 Other tools pass through unchanged; the gate guards only the four listed above.
 
@@ -38,6 +40,13 @@ from claude_agent_sdk import (
 
 __all__ = ["security_gate"]
 
+# Python 3 str regex uses Unicode whitespace: \s matches NBSP (U+00A0),
+# ideographic space (U+3000), etc. — but NOT zero-width space (U+200B).
+# This means:
+#   "git\u00a0status"  → allowed (NBSP is \s, consistent with normal space)
+#   "git\u200bstatus"  → denied (ZWSP isn't \s; regex fails at the `\s+`)
+# Both behaviors lock-tested below.
+#
 # Only these read-only `git` subcommands are permitted via Bash.
 # The anchored regex rejects anything after the subcommand keyword unless
 # followed by whitespace or end-of-string, so `gitpush` / `git-log` don't slip.
@@ -48,12 +57,31 @@ _BASH_ALLOWLIST = re.compile(
 )
 
 # Shell metacharacters that would let a command escape the allowlist by
-# chaining a second command. We reject any Bash input containing any of these,
-# even if the head looks like an allowed `git` subcommand.
-_COMPOUND_MARKERS: tuple[str, ...] = (";", "&&", "||", "|", "`", "$(")
+# chaining a second command, redirecting output, or running in the background.
+# We reject any Bash input containing any of these, even if the head looks
+# like an allowed `git` subcommand. `&` as a substring also covers `&&`
+# (already listed explicitly for readability) and catches trailing-background.
+_COMPOUND_MARKERS: tuple[str, ...] = (
+    ";",
+    "&&",
+    "||",
+    "&",
+    "|",
+    "`",
+    "$(",
+    ">",
+    "<",
+    "\n",
+)
 
-# Glob patterns for paths that must never be read by the brain. Mirrors the
-# `FsTool` denylist semantics from `.claude/settings.json`.
+# Patterns use fnmatch semantics (Python stdlib), NOT shell/zsh glob:
+#   * matches everything including path separators
+#   ** is treated identically to * (no recursive-directory meaning)
+#   Patterns are matched against both the full path AND the basename.
+# If you port to pathlib.PurePath.match or shell, re-verify every pattern —
+# in particular `.env.*` behaves differently (pathlib's * won't match leading .).
+#
+# Mirrors the deny list in `.claude/settings.json`.
 _SECRET_PATTERNS: tuple[str, ...] = (
     ".env",
     ".env.*",
@@ -62,6 +90,19 @@ _SECRET_PATTERNS: tuple[str, ...] = (
     "id_rsa*",
     "secrets/**",
     "credentials*",
+)
+
+# Substring heuristics for Glob `pattern` fields: denies shell-style globs
+# like `**/*.env` or `secrets/**/*.yaml` that the fnmatch-based secret path
+# check would not catch when the caller passes the glob as a pattern (not a
+# literal path). Applied case-insensitively.
+_SECRET_PATTERN_SUBSTRINGS: tuple[str, ...] = (
+    "id_rsa",
+    ".env",
+    ".pem",
+    ".key",
+    "secret",
+    "credential",
 )
 
 # The tool-input keys that carry a path or pattern we need to screen.
@@ -109,40 +150,69 @@ def _is_allowed_bash(command: str) -> tuple[bool, str]:
 def _matched_secret_pattern(path: str) -> str | None:
     """Return the first secret glob matching `path`, or None.
 
-    Each pattern is tested against both the full path (for patterns like
-    ``secrets/**``) and the basename (for patterns like ``.env`` that should
-    match regardless of leading directories).
+    Matching is case-insensitive (macOS APFS is case-insensitive by default, so
+    ``.ENV`` / ``ID_RSA`` / ``Credentials.json`` resolve to the same files as
+    their lowercase forms). Each pattern is tested against both the full path
+    (for patterns like ``secrets/**``) and the basename (for patterns like
+    ``.env`` that should match regardless of leading directories). The
+    *original* pattern (not the lowercased form) is returned so the deny
+    reason stays readable.
     """
     if not path:
         return None
-    basename = PurePosixPath(path).name
+    lowered = path.lower()
+    basename = PurePosixPath(lowered).name
     for pattern in _SECRET_PATTERNS:
-        if fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(basename, pattern):
+        lowered_pat = pattern.lower()
+        if fnmatch.fnmatch(lowered, lowered_pat) or fnmatch.fnmatch(basename, lowered_pat):
             return pattern
     return None
 
 
+def _glob_pattern_is_suspicious(pattern: str) -> tuple[bool, str]:
+    """Return (True, needle) if a Glob pattern contains a secret-suggesting substring.
+
+    Heuristic only; case-insensitive. Catches patterns like ``**/*.env`` and
+    ``secrets/**/*.yaml`` whose literal string wouldn't match the fnmatch-based
+    secret blocklist but which clearly intend to harvest secrets.
+    """
+    lowered = pattern.lower()
+    for needle in _SECRET_PATTERN_SUBSTRINGS:
+        if needle in lowered:
+            return True, needle
+    return False, ""
+
+
 async def security_gate(
     input_data: PreToolUseHookInput,
-    tool_use_id: str | None,
-    context: HookContext,
+    _tool_use_id: str | None,
+    _context: HookContext,
 ) -> HookJSONOutput:
     """PreToolUse hook: enforce read-only Bash + secret-path blocklist.
 
     Returns an empty dict to allow the tool call, or a deny decision with a
     reason the SDK surfaces back to Claude so it can choose a different path.
     """
-    del tool_use_id, context  # not used; kept for HookCallback signature parity
-
     tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input", {}) or {}
 
     if tool_name == "Bash":
-        command = tool_input.get("command", "")
-        if not isinstance(command, str):
-            return _deny("Bash command must be a string")
+        raw_command = tool_input.get("command", "")
+        # Normalize any non-string shape to empty so `_is_allowed_bash` denies
+        # cleanly (list/int/None would otherwise crash the `in`/regex checks).
+        command = raw_command if isinstance(raw_command, str) else ""
         ok, reason = _is_allowed_bash(command)
         return _allow() if ok else _deny(reason)
+
+    if tool_name == "Glob":
+        pattern_val = tool_input.get("pattern")
+        if isinstance(pattern_val, str):
+            suspicious, needle = _glob_pattern_is_suspicious(pattern_val)
+            if suspicious:
+                return _deny(
+                    f"Glob pattern {pattern_val!r} contains secret-suggesting "
+                    f"substring {needle!r}"
+                )
 
     if tool_name in _GUARDED_PATH_TOOLS:
         for key in _PATH_INPUT_KEYS:
