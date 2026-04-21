@@ -1,5 +1,7 @@
 # Reachy Ducky — Phase A MVP Implementation Plan
 
+> **PARTIAL SUPERSESSION (2026-04-22):** Milestones 2 (extension), 3 (full rewrite), and 5 (rewrite) are revised in [`2026-04-22-phase-a-addendum-pattern-b.md`](2026-04-22-phase-a-addendum-pattern-b.md). The original M3 tool-belt design (handcrafted `GitTool`/`GhTool`/`FsTool`/`PlansTool` Python wrappers) is revoked; the implementation pivoted to use SDK built-ins + official MCP servers + an in-process plans MCP. See [`2026-04-22-pattern-b-redesign.md`](2026-04-22-pattern-b-redesign.md) for rationale. Milestones 0, 1, 4, 6, 7-13 are unchanged.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task.
 
 **Goal:** Ship the Phase A MVP of Reachy Ducky — an on-demand conversational companion running on a Reachy Mini, with a Mac-side daemon that holds the memory, tool belt, and plan-reviewer specialist. No event-driven observation, no interruption policy, no always-on mode — the user summons Ducky, Ducky answers.

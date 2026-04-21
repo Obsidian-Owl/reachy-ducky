@@ -19,6 +19,16 @@ npx gitnexus analyze --skip-agents-md   # refresh code index (incremental by def
 
 On the robot only: `uv sync --all-packages --extra robot` additionally installs `reachy-mini` from the app package's `robot` extra.
 
+### Prereqs for the daemon's Pattern B brain
+
+The thinking brain spawns external MCP servers:
+
+- **Node.js 20+** — required for `npx -y github-mcp-server` (declared in `.mcp.json`).
+- **`GITHUB_PERSONAL_ACCESS_TOKEN`** env var — `repo:read` + `pull_requests:read` + `issues:read` scopes are sufficient for read-only operation.
+- **`REACHY_DUCKY_AUTH_TOKEN`** — bearer token if exposing the daemon over LAN; see `.claude/rules/` and the design doc §5.
+
+Live-Claude integration tests run via `.github/workflows/integration.yml` (PR-with-`integration`-label or weekly cron) using the `CLAUDE_CODE_OAUTH_TOKEN` org secret.
+
 Integration tests (live Claude / OpenAI / HF): `uv run pytest -m integration` with relevant env vars.
 Hardware tests (Reachy Mini): `uv run pytest -m hardware`, requires connected robot.
 
