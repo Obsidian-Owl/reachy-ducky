@@ -10,8 +10,14 @@ from __future__ import annotations
 import hmac
 from pathlib import Path
 
-from fastapi import FastAPI, Request
-from reachy_ducky_protocol.messages import BrainRequest, BrainResponse, HealthResponse
+from fastapi import FastAPI, HTTPException, Request
+from reachy_ducky_protocol.messages import (
+    BrainRequest,
+    BrainResponse,
+    HealthResponse,
+    SpecialistRequest,
+    SpecialistResponse,
+)
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
@@ -19,6 +25,7 @@ from starlette.types import ASGIApp
 from .brain.interface import BrainInterface
 from .config import Config
 from .memory.layout import ensure_layout
+from .specialists.plan_reviewer import PlanReviewer
 
 # /docs and /openapi.json are open by intent. In the Tailscale-primary
 # deployment envelope the schema disclosure is an acceptable trade for
@@ -53,7 +60,9 @@ def create_app(
     brain: BrainInterface,
     memory_root: Path,
     auth_token: str | None = None,
+    repo_roots: dict[str, Path] | None = None,
 ) -> FastAPI:
+    repo_roots = repo_roots or {}
     ensure_layout(memory_root)
     app = FastAPI(title="reachy-ducky-daemon")
     app.add_middleware(BearerAuthMiddleware, token=auth_token)
@@ -69,6 +78,13 @@ def create_app(
     @app.post("/brain/query", response_model=BrainResponse)
     async def brain_query(req: BrainRequest) -> BrainResponse:
         return await brain.query(req)
+
+    @app.post("/specialists/plan-reviewer", response_model=SpecialistResponse)
+    async def plan_reviewer_route(req: SpecialistRequest) -> SpecialistResponse:
+        repo = repo_roots.get(req.project_slug)
+        if repo is None:
+            raise HTTPException(status_code=404, detail=f"unknown project: {req.project_slug}")
+        return await PlanReviewer(brain=brain, repo=repo).review()
 
     return app
 
