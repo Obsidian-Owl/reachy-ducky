@@ -8,6 +8,7 @@
 
 ```bash
 uv sync --all-packages --group dev   # install workspace + dev tools
+uv run reachy-ducky init             # first-run wizard → ~/.reachy-ducky/{config.toml,.env}
 uv run pytest -q                     # unit tests (default tier)
 uv run ruff check --fix .            # lint + autofix
 uv run ruff format .                 # format
@@ -16,6 +17,8 @@ uv run bandit -r daemon/src app/src menubar/src protocol/src -ll
 lefthook run pre-commit --all-files
 npx gitnexus analyze --skip-agents-md   # refresh code index (incremental by default)
 ```
+
+First-time daemon setup is `uv run reachy-ducky init` — it prompts for daemon host/port, an optional auth token, an optional GitHub PAT, and at least one project (slug + git-repo path + optional `github_repo`). Writes `~/.reachy-ducky/config.toml`, a 0600 `~/.reachy-ducky/.env` for any secrets, and seeds the memory tree. Re-running is safe: the wizard detects existing config and asks before overwriting.
 
 On the robot only: `uv sync --all-packages --extra robot` additionally installs `reachy-mini` from the app package's `robot` extra.
 
