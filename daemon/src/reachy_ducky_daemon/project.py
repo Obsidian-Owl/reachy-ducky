@@ -19,10 +19,10 @@ from pathlib import Path
 __all__ = ["Project"]
 
 # Lowercase kebab-case; must start with [a-z0-9] so slugs never begin
-# with a separator. Kept strict on purpose — slugs are wire-visible
-# (they appear in BrainRequest.project_slug) so forgiving garbage here
-# leaks typos downstream.
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+# with a separator. Length-bounded (1-64) because slugs are wire-visible
+# (BrainRequest.project_slug, HealthResponse.projects, log lines) and an
+# unbounded slug is a log-flood and response-size vector.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
 @dataclass(frozen=True)

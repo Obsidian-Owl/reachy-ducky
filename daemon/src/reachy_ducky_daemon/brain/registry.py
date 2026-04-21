@@ -59,7 +59,18 @@ class BrainRegistry:
         self._brains: dict[str, BrainInterface] = {}
 
     def brain_for(self, slug: str) -> BrainInterface:
-        """Return the cached brain for ``slug``, building it on first access."""
+        """Return the cached brain for ``slug``, building it on first access.
+
+        Concurrency invariant: BrainFactory must be safe to call from a single
+        event-loop thread with no cross-request locking. Today this holds —
+        ``ClaudeSDKBrain.with_tools()`` is documented as pure config assembly
+        with no live Claude, subprocess, filesystem, or network I/O at call
+        time (see brain/options.py). MCP subprocesses spawn at tool dispatch,
+        not at construction. If a future BrainFactory ever spawns resources at
+        construction time (e.g., eager MCP boot, disk cache warm-up), this
+        method needs an asyncio.Lock because FastAPI can dispatch two queries
+        with the same unbuilt slug onto the same event loop simultaneously.
+        """
         if slug not in self._projects:
             raise KeyError(slug)
         if slug not in self._brains:

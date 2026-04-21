@@ -86,6 +86,20 @@ def test_project_accepts_valid_slug(tmp_path: Path, good_slug: str) -> None:
     assert p.slug == good_slug
 
 
+def test_project_accepts_slug_at_length_bound(tmp_path: Path) -> None:
+    """64-character slug is the top of the allowed range."""
+    slug = "a" + "b" * 63  # 64 chars total
+    p = Project(slug=slug, path=tmp_path)
+    assert p.slug == slug
+
+
+def test_project_rejects_slug_over_length_bound(tmp_path: Path) -> None:
+    """65+ character slugs are rejected so slugs can't flood logs or responses."""
+    slug = "a" + "b" * 64  # 65 chars
+    with pytest.raises(ValueError, match="slug"):
+        Project(slug=slug, path=tmp_path)
+
+
 @pytest.mark.parametrize(
     "bad_repo",
     [
