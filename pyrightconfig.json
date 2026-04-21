@@ -1,6 +1,7 @@
 {
   "venvPath": ".",
   "venv": ".venv",
+  "pythonPath": "./.venv/bin/python",
   "pythonVersion": "3.12",
   "include": [
     "daemon/src",

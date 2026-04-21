@@ -17,7 +17,7 @@ async def test_claude_sdk_brain_joins_streamed_text() -> None:
         {"type": "text", "text": "world"},
     ]
 
-    async def fake_query(*args: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+    async def fake_query(*_args: Any, **_kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         for chunk in fake_chunks:
             yield chunk
 
@@ -33,7 +33,7 @@ async def test_claude_sdk_brain_passes_user_prompt() -> None:
     """ClaudeSDKBrain forwards the user's utterance as the SDK prompt."""
     seen: dict[str, Any] = {}
 
-    async def fake_query(prompt: str, options: Any) -> AsyncIterator[dict[str, Any]]:
+    async def fake_query(prompt: str, _options: Any) -> AsyncIterator[dict[str, Any]]:
         seen["prompt"] = prompt
         yield {"type": "text", "text": "ack"}
 
