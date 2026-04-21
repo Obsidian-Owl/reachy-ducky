@@ -10,14 +10,32 @@ Exposes two read-only tools over ``create_sdk_mcp_server``:
 
     1. the resolved target path must stay inside the project root
        (``..`` traversal, absolute paths, and symlink escapes are denied);
-    2. the target path must match one of the conventional patterns
-       (``read_plan`` is not a general-purpose file reader — daemon source and
-       secrets are denied even if they exist).
+    2. the target path must be one of the files that :func:`_discover` would
+       advertise (``read_plan`` is not a general-purpose file reader — daemon
+       source and secrets are denied even if they exist).
 
 The tool surface is intentionally tiny: Claude uses its built-in ``Read`` /
 ``Glob`` / ``Grep`` tools (gated by the PreToolUse security hook) for
 everything else. ``find_plans`` / ``read_plan`` exist so Claude can discover
 and orient without first having to remember the conventional locations.
+
+Single source of truth. Both layers call :func:`_discover` — ``_list_plans``
+returns its output as relative POSIX strings, and ``_read_plan`` validates by
+checking membership in the same set. This collapses what used to be two
+matchers (``Path.glob`` for discovery, ``PurePath.match`` for validation) into
+one, which matters because those two engines are NOT parity-equivalent:
+
+* ``PurePath.match("docs/plans/**/*.md")`` rejects ``docs/plans/a/b/c/d.md``
+  that ``Path.glob("docs/plans/**/*.md")`` finds — under-approximation, making
+  ``_read_plan`` deny paths ``_list_plans`` advertised.
+* ``PurePath.match("AGENTS.md")`` is a **tail match** (no leading anchor), so
+  ``nested/AGENTS.md`` matches even though ``base.glob("AGENTS.md")`` only
+  matches at the root — over-approximation, making attacker-droppable files
+  readable even though ``_list_plans`` wouldn't advertise them. That was the
+  security widening we are eliminating here.
+
+One ``_discover`` call per ``_read_plan`` is slightly more expensive than a
+pattern check, but correct, auditable, and cache-able later if it matters.
 
 Verified SDK shape (``claude_agent_sdk`` 0.1.60)::
 
@@ -43,7 +61,7 @@ Not wired into :class:`ClaudeSDKBrain` here; Task 3.4 registers this server in
 
 from __future__ import annotations
 
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server, tool
@@ -58,13 +76,12 @@ __all__ = [
 # Conventional plan/spec locations. This set is the read surface of
 # ``read_plan``; widening it widens what the brain can read via this server.
 #
-# Matching uses ``pathlib.Path.glob`` for both discovery (``_list_plans``)
-# and single-path validation (``_read_plan``) so both layers share identical
-# semantics. ``fnmatch`` is deliberately NOT used: its ``*`` matches path
-# separators and it has no recursive ``**`` operator, so ``docs/plans/**/*.md``
-# under fnmatch would fail to match ``docs/plans/hello.md`` (zero intermediate
-# directories) while ``Path.glob`` correctly matches both ``docs/plans/*.md``
-# and ``docs/plans/a/b/c/*.md`` for the same pattern.
+# ``Path.glob`` is the canonical matcher: both ``_list_plans`` (discovery) and
+# ``_read_plan`` (validation) resolve paths through :func:`_discover`, which
+# uses this pattern list. ``fnmatch`` / ``PurePath.match`` are deliberately NOT
+# used: the former has no recursive ``**`` operator and the latter is a tail
+# match without a leading anchor (``nested/AGENTS.md`` would wrongly match
+# ``AGENTS.md``) — both would drift from ``Path.glob`` semantics.
 _CONVENTIONAL_PATTERNS: tuple[str, ...] = (
     "docs/plans/**/*.md",
     "specs/**/*.md",
@@ -79,11 +96,12 @@ def _discover(base: Path) -> set[Path]:
     """Return the absolute paths of every file under ``base`` matched by any
     conventional pattern.
 
-    Shared engine for discovery and validation: both layers call this helper
-    so path-inclusion semantics are identical. ``Path.glob`` handles ``**``
-    correctly (including the zero-intermediate-dir case); this avoids the
-    fnmatch/Path.match divergence where ``docs/plans/**/*.md`` under those
-    flat matchers would reject ``docs/plans/hello.md``.
+    The single source of truth for both :func:`_list_plans` (discovery) and
+    :func:`_read_plan` (validation). ``Path.glob`` handles ``**`` correctly
+    (including the zero-intermediate-dir case) and anchors each pattern to
+    ``base`` — i.e. ``base.glob("AGENTS.md")`` matches only ``base/AGENTS.md``,
+    not ``base/nested/AGENTS.md``. That anchoring is what makes the read
+    surface exactly as wide as the discover surface.
     """
     results: set[Path] = set()
     for pattern in _CONVENTIONAL_PATTERNS:
@@ -107,40 +125,22 @@ def _list_plans(project_root: Path) -> list[str]:
     return sorted(p.relative_to(base).as_posix() for p in _discover(base))
 
 
-def _matches_conventional_pattern(rel_as_posix: str) -> bool:
-    """Return ``True`` iff the project-relative path string matches any
-    conventional plan/spec pattern, using :func:`Path.glob` semantics for
-    ``**`` (zero-or-more intermediate directories).
-
-    ``pathlib.PurePath.match`` on 3.12 treats ``X/**/Y`` as requiring at
-    least one intermediate segment (so ``docs/plans/**/*.md`` would miss
-    ``docs/plans/hello.md``), and ``fnmatch.fnmatch`` has no recursive
-    ``**`` operator at all. We therefore test each pattern against the
-    candidate AND against a ``**/`` -collapsed variant so zero-depth hits
-    (e.g. ``docs/plans/x.md``) and deep hits (e.g. ``docs/plans/a/b.md``)
-    both pass, matching the exact set discovered by :func:`Path.glob`.
-    """
-    candidate = PurePosixPath(rel_as_posix)
-    for pattern in _CONVENTIONAL_PATTERNS:
-        if candidate.match(pattern):
-            return True
-        if "**/" in pattern and candidate.match(pattern.replace("**/", "")):
-            return True
-    return False
-
-
 def _read_plan(project_root: Path, rel_path: str) -> str:
     """Return the UTF-8 text of a plan/spec file, or raise.
 
     Raises:
         PermissionError: if ``rel_path`` resolves outside ``project_root``
             (``..`` escape, absolute path, symlink escape), or if the
-            resolved path is not one of the conventional plan/spec
-            locations. The pattern check fires regardless of whether the
-            path exists on disk, so probing non-plan locations cannot be
-            used as an existence oracle for arbitrary files.
-        FileNotFoundError: if ``rel_path`` would be a legitimate plan
-            location (e.g. ``docs/plans/foo.md``) but no file is there.
+            resolved path is not one of the files that :func:`_discover`
+            would advertise. The membership check fires regardless of
+            whether the path exists on disk, so probing non-plan locations
+            cannot be used as an existence oracle for arbitrary files.
+        OSError: subclasses (``FileNotFoundError``, ``PermissionError`` from
+            the filesystem, etc.) surface from ``read_text``.
+        UnicodeDecodeError: if the file exists and is advertised but isn't
+            valid UTF-8.
+        ValueError: if ``rel_path`` contains null bytes or similarly rejected
+            characters that ``Path.resolve()`` refuses.
     """
     base = project_root.resolve()
     target = (base / rel_path).resolve()
@@ -150,12 +150,12 @@ def _read_plan(project_root: Path, rel_path: str) -> str:
     except ValueError as exc:
         raise PermissionError(f"path escapes project root: {rel_path}") from exc
 
-    rel_as_posix = target.relative_to(base).as_posix()
-    if not _matches_conventional_pattern(rel_as_posix):
+    if target not in _discover(base):
+        # Single source of truth: the target must be something _list_plans
+        # would advertise. ``_discover`` only returns files that exist, so a
+        # missing file here falls into this branch rather than a separate
+        # FileNotFoundError check.
         raise PermissionError(f"not a plan or spec file: {rel_path}")
-
-    if not target.is_file():
-        raise FileNotFoundError(rel_path)
 
     return target.read_text(encoding="utf-8")
 
@@ -173,7 +173,12 @@ def _read_plan(project_root: Path, rel_path: str) -> str:
     {"project_root": str},
 )
 async def find_plans(args: dict[str, Any]) -> dict[str, Any]:
-    """MCP ``find_plans`` wrapper: format :func:`_list_plans` as a text block."""
+    """MCP ``find_plans`` wrapper: format :func:`_list_plans` as a text block.
+
+    Catches ``OSError`` (filesystem errors during ``resolve()`` / ``glob``) and
+    ``ValueError`` (e.g. null byte in ``project_root``) so the handler never
+    raises — the SDK dispatcher can rely on a well-formed response.
+    """
     project_root = args["project_root"]
     if not isinstance(project_root, str):
         return {
@@ -182,7 +187,13 @@ async def find_plans(args: dict[str, Any]) -> dict[str, Any]:
             ],
             "isError": True,
         }
-    paths = _list_plans(Path(project_root))
+    try:
+        paths = _list_plans(Path(project_root))
+    except (OSError, ValueError) as exc:
+        return {
+            "content": [{"type": "text", "text": f"error: failed to list plans: {exc}"}],
+            "isError": True,
+        }
     text = "\n".join(paths) if paths else "(no plans found)"
     return {"content": [{"type": "text", "text": text}]}
 
@@ -196,7 +207,20 @@ async def find_plans(args: dict[str, Any]) -> dict[str, Any]:
 )
 async def read_plan(args: dict[str, Any]) -> dict[str, Any]:
     """MCP ``read_plan`` wrapper: call :func:`_read_plan` and surface errors
-    as MCP ``isError`` responses rather than raising."""
+    as MCP ``isError`` responses rather than raising.
+
+    The ``except`` clause is intentionally broad:
+
+    * ``OSError`` is the superclass of ``PermissionError`` and
+      ``FileNotFoundError`` (so both stay covered) plus other filesystem
+      errors (missing parents, permission denials from ``read_text``, etc.)
+      that used to escape the handler.
+    * ``UnicodeDecodeError`` fires when the file exists and is advertised
+      but isn't valid UTF-8 (e.g. a ``\\xff`` byte).
+    * ``ValueError`` fires when ``Path.resolve()`` refuses the input — most
+      commonly a null byte (``..\\x00/.env``) which used to crash the async
+      handler uncaught.
+    """
     project_root = args["project_root"]
     rel_path = args["rel_path"]
     if not isinstance(project_root, str) or not isinstance(rel_path, str):
@@ -208,9 +232,9 @@ async def read_plan(args: dict[str, Any]) -> dict[str, Any]:
         }
     try:
         text = _read_plan(Path(project_root), rel_path)
-    except (PermissionError, FileNotFoundError) as exc:
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
         return {
-            "content": [{"type": "text", "text": f"error: {exc}"}],
+            "content": [{"type": "text", "text": f"error: failed to read plan: {exc}"}],
             "isError": True,
         }
     return {"content": [{"type": "text", "text": text}]}

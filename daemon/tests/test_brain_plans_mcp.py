@@ -188,9 +188,18 @@ def test_read_plan_rejects_absolute_path(tmp_path: Path) -> None:
         _read_plan(tmp_path, "/etc/passwd")
 
 
-def test_read_plan_missing_file(tmp_path: Path) -> None:
-    """Missing file under a legal plans path raises FileNotFoundError."""
-    with pytest.raises(FileNotFoundError):
+def test_read_plan_missing_file_denied_as_non_plan(tmp_path: Path) -> None:
+    """A non-existent ``docs/plans/foo.md`` is denied rather than raising
+    ``FileNotFoundError``.
+
+    Under the single-source-of-truth model, ``_read_plan`` asks
+    ``_discover(base)`` whether the target is advertised — and ``_discover``
+    only returns files that exist on disk. So a missing file in a legal plan
+    location falls into the "not a plan or spec" branch, which is the
+    desired behaviour: no existence oracle for arbitrary paths and no
+    discrimination between "absent plan file" and "present non-plan file".
+    """
+    with pytest.raises(PermissionError, match="not a plan or spec"):
         _read_plan(tmp_path, "docs/plans/nonexistent.md")
 
 
@@ -276,6 +285,102 @@ def test_read_plan_symlink_to_file_inside_project_allowed(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
+# C1 regression — matcher / discover parity (Bug 1: under-approximation)
+# ---------------------------------------------------------------------------
+
+
+def test_read_plan_deep_docs_plans_path_matches_discover_surface(tmp_path: Path) -> None:
+    """_read_plan must accept any path _list_plans advertises, regardless of depth.
+
+    Regression for Bug 1: ``PurePath.match("docs/plans/**/*.md")`` rejects
+    ``docs/plans/a/b/c/d.md`` (pathlib's match requires at least one ``**``
+    segment), so the old separate-matcher design denied paths that
+    ``Path.glob`` (used by ``_discover``) happily found. The single-source
+    implementation must round-trip cleanly.
+    """
+    deep = tmp_path / "docs" / "plans" / "a" / "b" / "c" / "d.md"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("deep plan contents")
+
+    listed = _list_plans(tmp_path)
+    assert "docs/plans/a/b/c/d.md" in listed
+    assert _read_plan(tmp_path, "docs/plans/a/b/c/d.md") == "deep plan contents"
+
+
+def test_read_plan_deep_specs_path_matches_discover_surface(tmp_path: Path) -> None:
+    """Same round-trip invariant for the ``specs/**/*.md`` branch."""
+    deep = tmp_path / "specs" / "a" / "b" / "c.md"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("deep spec contents")
+
+    listed = _list_plans(tmp_path)
+    assert "specs/a/b/c.md" in listed
+    assert _read_plan(tmp_path, "specs/a/b/c.md") == "deep spec contents"
+
+
+# ---------------------------------------------------------------------------
+# C1 regression — matcher / discover parity (Bug 2: over-approximation, SECURITY)
+# ---------------------------------------------------------------------------
+
+
+def test_read_plan_denies_agents_md_outside_root(tmp_path: Path) -> None:
+    """``AGENTS.md`` is anchored to the project root; nested ``AGENTS.md`` is denied.
+
+    Regression for Bug 2 (security): ``PurePath.match("AGENTS.md")`` is a
+    tail match with no leading anchor, so ``nested/AGENTS.md`` matched under
+    the old matcher and became readable even though ``_list_plans`` (which
+    uses ``base.glob("AGENTS.md")``) correctly anchored the pattern to the
+    root. The single-source fix restores parity.
+    """
+    nested = tmp_path / "nested" / "AGENTS.md"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("attacker dropped")
+
+    assert "nested/AGENTS.md" not in _list_plans(tmp_path)
+    with pytest.raises(PermissionError, match="not a plan or spec"):
+        _read_plan(tmp_path, "nested/AGENTS.md")
+
+
+def test_read_plan_denies_plan_md_outside_root(tmp_path: Path) -> None:
+    """``*.plan.md`` is anchored to the root; deep ``*.plan.md`` is denied.
+
+    Regression for Bug 2 (security): an attacker who drops
+    ``daemon/src/secrets.plan.md`` must NOT become readable just because the
+    suffix matches — ``base.glob("*.plan.md")`` anchors to the root, and the
+    validation layer must agree.
+    """
+    hidden = tmp_path / "daemon" / "src" / "secrets.plan.md"
+    hidden.parent.mkdir(parents=True)
+    hidden.write_text("attacker dropped")
+
+    assert "daemon/src/secrets.plan.md" not in _list_plans(tmp_path)
+    with pytest.raises(PermissionError, match="not a plan or spec"):
+        _read_plan(tmp_path, "daemon/src/secrets.plan.md")
+
+
+def test_read_plan_denies_nested_claude_md(tmp_path: Path) -> None:
+    """Belt-and-braces: nested ``CLAUDE.md`` is denied (same anchoring rule)."""
+    nested = tmp_path / "nested" / "CLAUDE.md"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("nested claude")
+
+    assert "nested/CLAUDE.md" not in _list_plans(tmp_path)
+    with pytest.raises(PermissionError, match="not a plan or spec"):
+        _read_plan(tmp_path, "nested/CLAUDE.md")
+
+
+def test_read_plan_denies_nested_spec_md(tmp_path: Path) -> None:
+    """Belt-and-braces: nested ``SPEC.md`` is denied (same anchoring rule)."""
+    nested = tmp_path / "nested" / "SPEC.md"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("nested spec")
+
+    assert "nested/SPEC.md" not in _list_plans(tmp_path)
+    with pytest.raises(PermissionError, match="not a plan or spec"):
+        _read_plan(tmp_path, "nested/SPEC.md")
+
+
+# ---------------------------------------------------------------------------
 # SDK wrapper behaviour (find_plans / read_plan @tool objects)
 # ---------------------------------------------------------------------------
 
@@ -355,6 +460,46 @@ async def test_read_plan_tool_surfaces_escape_attempt(tmp_path: Path) -> None:
     assert "escapes project root" in result["content"][0]["text"]
 
 
+async def test_read_plan_handler_returns_error_on_non_utf8_content(
+    tmp_path: Path,
+) -> None:
+    """Binary / non-UTF-8 content returns isError rather than crashing the handler.
+
+    Regression for I1: ``read_text(encoding='utf-8')`` on a ``\\xff`` byte
+    raises ``UnicodeDecodeError``, which used to escape the
+    ``(PermissionError, FileNotFoundError)`` except clause and crash the
+    async handler uncaught.
+    """
+    binary = tmp_path / "docs" / "plans" / "binary.md"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"\xff\xfe\x00\x01")  # invalid UTF-8
+
+    result = await read_plan.handler(
+        {"project_root": str(tmp_path), "rel_path": "docs/plans/binary.md"}
+    )
+
+    assert result.get("isError") is True
+    assert "content" in result
+    assert result["content"][0]["type"] == "text"
+
+
+async def test_read_plan_handler_returns_error_on_null_byte_in_path(
+    tmp_path: Path,
+) -> None:
+    """Null byte in ``rel_path`` returns isError rather than crashing the handler.
+
+    Regression for I2: ``Path.resolve()`` raises ``ValueError`` on paths
+    containing embedded null bytes (``..\\x00/.env``). Under the old except
+    clause that escaped the handler; the widened ``(OSError,
+    UnicodeDecodeError, ValueError)`` catches it cleanly.
+    """
+    result = await read_plan.handler({"project_root": str(tmp_path), "rel_path": "..\x00/.env"})
+
+    assert result.get("isError") is True
+    assert "content" in result
+    assert result["content"][0]["type"] == "text"
+
+
 # ---------------------------------------------------------------------------
 # create_sdk_mcp_server integration (hello-world wiring check)
 # ---------------------------------------------------------------------------
@@ -393,3 +538,78 @@ def test_conventional_patterns_locked() -> None:
         "SPEC.md",
         "*.plan.md",
     }
+
+
+# ---------------------------------------------------------------------------
+# MCP server dispatch (I4: closes the registration blind spot)
+# ---------------------------------------------------------------------------
+
+
+async def test_plans_mcp_server_dispatches_through_registered_handlers(
+    tmp_path: Path,
+) -> None:
+    """Route a synthetic ``tools/list`` + ``tools/call`` through the created
+    server instance to prove that ``find_plans`` and ``read_plan`` are
+    actually reachable via the MCP request path — not merely exposed as
+    ``@tool`` objects in the process.
+
+    Regression for I4: the previous integration test was shape-only
+    (``config['type'] == 'sdk'``, tool metadata). That can't catch a tool
+    registered twice, skipped, or mis-named in the decorator — the MCP
+    dispatcher would still fail at runtime. This test exercises the real
+    request handlers the SDK hands to Claude.
+
+    The instance is an ``mcp.server.lowlevel.server.Server`` with a
+    ``request_handlers`` mapping keyed by the MCP request types. We invoke
+    ``ListToolsRequest`` and ``CallToolRequest`` handlers directly, mirroring
+    what the SDK transport does. ``ServerResult`` is a Pydantic ``RootModel``
+    union of every response shape, so we narrow with ``isinstance`` to keep
+    strict mypy happy while also asserting the actual response class.
+    """
+    from mcp import types as mcp_types
+
+    (tmp_path / "docs" / "plans").mkdir(parents=True)
+    (tmp_path / "docs" / "plans" / "a.md").write_text("alpha plan")
+
+    config = plans_mcp_server()
+    instance = config["instance"]
+
+    list_handler = instance.request_handlers[mcp_types.ListToolsRequest]
+    list_result = await list_handler(mcp_types.ListToolsRequest(method="tools/list", params=None))
+    list_payload = list_result.root
+    assert isinstance(list_payload, mcp_types.ListToolsResult)
+    tool_names = {t.name for t in list_payload.tools}
+    assert {"find_plans", "read_plan"} <= tool_names
+
+    call_handler = instance.request_handlers[mcp_types.CallToolRequest]
+    find_result = await call_handler(
+        mcp_types.CallToolRequest(
+            method="tools/call",
+            params=mcp_types.CallToolRequestParams(
+                name="find_plans",
+                arguments={"project_root": str(tmp_path)},
+            ),
+        )
+    )
+    find_payload = find_result.root
+    assert isinstance(find_payload, mcp_types.CallToolResult)
+    assert find_payload.isError is False
+    find_block = find_payload.content[0]
+    assert isinstance(find_block, mcp_types.TextContent)
+    assert "docs/plans/a.md" in find_block.text
+
+    read_result = await call_handler(
+        mcp_types.CallToolRequest(
+            method="tools/call",
+            params=mcp_types.CallToolRequestParams(
+                name="read_plan",
+                arguments={"project_root": str(tmp_path), "rel_path": "docs/plans/a.md"},
+            ),
+        )
+    )
+    read_payload = read_result.root
+    assert isinstance(read_payload, mcp_types.CallToolResult)
+    assert read_payload.isError is False
+    read_block = read_payload.content[0]
+    assert isinstance(read_block, mcp_types.TextContent)
+    assert read_block.text == "alpha plan"
