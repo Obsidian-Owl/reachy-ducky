@@ -48,10 +48,20 @@ API calls), not at factory build time. Document this in the daemon startup
 path: the caller must ensure the env var is set before the daemon starts if
 ``github_repo`` is provided.
 
+``GITHUB_PERSONAL_ACCESS_TOKEN`` is read from ``os.environ`` on each factory
+call. An already-built ``ClaudeAgentOptions`` captures the value at build
+time; callers who need to pick up a rotated token must rebuild.
+
 The only "real" toolset restrictor is ``tools=[...]`` (per SDK issue #361 —
 ``allowed_tools`` is just an auto-approve rule). We also set
-``disallowed_tools=['Write','Edit','NotebookEdit']`` as belt-and-suspenders;
-even if the tools-list mechanism is ever bypassed, writes stay denied.
+``disallowed_tools`` as belt-and-suspenders to cover every write-capable SDK
+tool; even if the tools-list mechanism is ever bypassed, writes stay denied.
+The SDK's own canonical write-intent regex (``types.py:538``) is
+``"Write|MultiEdit|Edit"``, so ``MultiEdit`` is first-class alongside
+``Write`` and ``Edit``. We additionally deny ``NotebookEdit`` (Jupyter
+write), ``TodoWrite`` (model-owned todo state — outside our read-only
+contract), and ``SlashCommand`` (meta-tool that could re-enter write paths
+via dispatched slash commands).
 """
 
 from __future__ import annotations
@@ -61,7 +71,7 @@ from pathlib import Path
 from typing import cast
 
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
-from claude_agent_sdk.types import HookCallback, McpStdioServerConfig
+from claude_agent_sdk.types import HookCallback, McpServerConfig, McpStdioServerConfig
 
 from .plans_mcp import plans_mcp_server
 from .security_gate import security_gate
@@ -134,6 +144,10 @@ def build_brain_options(
 ) -> ClaudeAgentOptions:
     """Assemble the :class:`ClaudeAgentOptions` that drives the thinking brain.
 
+    ``GITHUB_PERSONAL_ACCESS_TOKEN`` is read from ``os.environ`` on each
+    factory call. Already-built ``ClaudeAgentOptions`` captures the value
+    at build time; callers who need to pick up a rotated token must rebuild.
+
     Args:
         cwd: Project root the brain's ``Read``/``Glob``/``Grep``/``Bash`` tools
             are scoped to. Must be a ``Path`` — passing a string is rejected
@@ -144,7 +158,8 @@ def build_brain_options(
         github_repo: If provided, wires the external ``github-mcp-server``
             (npx spawn, read-only, limited toolsets) into ``mcp_servers`` and
             adds ``mcp__github__*`` to the tools allowlist. ``None`` omits
-            both.
+            both. Must match the ``owner/repo`` shape (non-empty owner,
+            non-empty repo, exactly one ``/``) when provided.
         system_prompt: Overrides :data:`DEFAULT_BRAIN_SYSTEM_PROMPT`.
         model: Model name passed to the SDK; default matches
             :class:`ClaudeSDKBrain`'s default (``claude-sonnet-4-6``).
@@ -158,11 +173,17 @@ def build_brain_options(
 
     Raises:
         TypeError: if ``cwd`` or ``memory_root`` is not a ``Path``.
+        ValueError: if ``github_repo`` is provided but does not match
+            ``owner/repo`` shape.
     """
     if not isinstance(cwd, Path):
         raise TypeError(f"cwd must be a pathlib.Path, got {type(cwd).__name__}")
     if not isinstance(memory_root, Path):
         raise TypeError(f"memory_root must be a pathlib.Path, got {type(memory_root).__name__}")
+    if github_repo is not None:
+        parts = github_repo.split("/")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise ValueError(f"github_repo must be 'owner/repo', got {github_repo!r}")
 
     tools: list[str] = [
         "Read",
@@ -175,7 +196,7 @@ def build_brain_options(
     if github_repo is not None:
         tools.append("mcp__github__*")
 
-    mcp_servers: dict[str, McpStdioServerConfig | object] = {
+    mcp_servers: dict[str, McpServerConfig] = {
         "plans": plans_mcp_server(),
     }
     if github_repo is not None:
@@ -184,16 +205,27 @@ def build_brain_options(
     return ClaudeAgentOptions(
         tools=tools,
         # Belt-and-suspenders: even if `tools` is ever bypassed (issue #361),
-        # writes stay denied. `NotebookEdit` is the Jupyter-targeting write
-        # tool and belongs in the same deny bucket.
-        disallowed_tools=["Write", "Edit", "NotebookEdit"],
+        # writes stay denied. This set covers every write-capable SDK tool:
+        #   - Write / Edit / MultiEdit — the core write trio. The SDK's own
+        #     canonical write-intent regex at types.py:538 is
+        #     "Write|MultiEdit|Edit", so MultiEdit is first-class.
+        #   - NotebookEdit — Jupyter-targeting write tool.
+        #   - TodoWrite — writes model-owned todo state; outside our
+        #     read-only contract.
+        #   - SlashCommand — meta-tool that could re-enter write paths via
+        #     dispatched slash commands.
+        disallowed_tools=[
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "TodoWrite",
+            "SlashCommand",
+        ],
         permission_mode="dontAsk",
         cwd=cwd,
         add_dirs=[memory_root],
-        # mypy can't narrow the TypedDict union here without a cast; the
-        # dict-literal shape matches McpSdkServerConfig / McpStdioServerConfig
-        # and is accepted by the SDK's TypedDict union at runtime.
-        mcp_servers=mcp_servers,  # type: ignore[arg-type]
+        mcp_servers=mcp_servers,
         hooks={
             "PreToolUse": [
                 HookMatcher(

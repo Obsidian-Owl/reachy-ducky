@@ -69,9 +69,23 @@ def test_default_tools_allowlist(tmp_path: Path) -> None:
 
 
 def test_default_disallowed_tools_blocks_writes(tmp_path: Path) -> None:
-    """``disallowed_tools`` hard-denies Write/Edit as belt-and-suspenders."""
+    """``disallowed_tools`` hard-denies every write-capable SDK tool."""
     opts = build_brain_options(cwd=tmp_path, memory_root=tmp_path / "mem")
-    assert set(opts.disallowed_tools) == {"Write", "Edit", "NotebookEdit"}
+    for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit", "TodoWrite", "SlashCommand"):
+        assert tool in opts.disallowed_tools
+
+
+def test_disallowed_tools_pins_expected_set(tmp_path: Path) -> None:
+    """disallowed_tools is the belt-and-suspenders bucket; changes must be deliberate."""
+    opts = build_brain_options(cwd=tmp_path, memory_root=tmp_path / "mem")
+    assert set(opts.disallowed_tools) == {
+        "Write",
+        "Edit",
+        "MultiEdit",
+        "NotebookEdit",
+        "TodoWrite",
+        "SlashCommand",
+    }
 
 
 def test_permission_mode_is_dont_ask(tmp_path: Path) -> None:
@@ -227,6 +241,46 @@ def test_github_mcp_env_empty_when_token_missing(tmp_path: Path) -> None:
     github_cfg: Any = _mcp_dict(opts)["github"]
     # Either an empty string or the key simply present but empty — assert by value.
     assert github_cfg["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"] == ""
+
+
+def test_github_repo_empty_string_rejected(tmp_path: Path) -> None:
+    """Empty ``github_repo`` is rejected with ValueError; symmetric with Path guards."""
+    with pytest.raises(ValueError, match="owner/repo"):
+        build_brain_options(
+            cwd=tmp_path,
+            memory_root=tmp_path / "mem",
+            github_repo="",
+        )
+
+
+def test_github_repo_missing_slash_rejected(tmp_path: Path) -> None:
+    """``github_repo`` without a ``/`` separator is rejected."""
+    with pytest.raises(ValueError, match="owner/repo"):
+        build_brain_options(
+            cwd=tmp_path,
+            memory_root=tmp_path / "mem",
+            github_repo="foo",
+        )
+
+
+def test_github_repo_trailing_slash_rejected(tmp_path: Path) -> None:
+    """``github_repo`` with an empty repo component is rejected."""
+    with pytest.raises(ValueError, match="owner/repo"):
+        build_brain_options(
+            cwd=tmp_path,
+            memory_root=tmp_path / "mem",
+            github_repo="owner/",
+        )
+
+
+def test_github_repo_valid_owner_repo_accepted(tmp_path: Path) -> None:
+    """A well-formed ``owner/repo`` string builds the github MCP config."""
+    opts = build_brain_options(
+        cwd=tmp_path,
+        memory_root=tmp_path / "mem",
+        github_repo="Obsidian-Owl/reachy-ducky",
+    )
+    assert "github" in _mcp_dict(opts)
 
 
 # ---------------------------------------------------------------------------
