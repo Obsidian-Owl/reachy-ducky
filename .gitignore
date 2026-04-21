@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+wheels/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual envs
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# uv
+# lock file is committed; cache dirs are not
+.uv-cache/
+
+# Type checkers
+.pyre/
+.pytype/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment / secrets (belt and braces — also blocked via .claude/settings.json)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+secrets/
+credentials*
+
+# Local Reachy Ducky runtime
+.reachy-ducky/
+/memory/
+
+# GitNexus local index
+.gitnexus/
+.gitnexus.db
+.gitnexus.duckdb
+
+# Node (for gitnexus via npx)
+node_modules/
+
+# Logs
+*.log
+logs/
+
+# Build outputs
+*.dmg
+*.pkg
