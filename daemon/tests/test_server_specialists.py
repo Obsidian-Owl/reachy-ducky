@@ -6,7 +6,10 @@ import subprocess
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from reachy_ducky_daemon.brain.interface import BrainInterface
 from reachy_ducky_daemon.brain.mock import MockBrain
+from reachy_ducky_daemon.brain.registry import BrainRegistry
+from reachy_ducky_daemon.project import Project
 from reachy_ducky_daemon.server import create_app
 
 
@@ -29,15 +32,20 @@ def _init_repo(root: Path) -> Path:
     return root
 
 
+def _registry_for(repo: Path, brain: BrainInterface | None = None) -> BrainRegistry:
+    """Build a one-project registry wired to ``repo`` and ``brain`` (or a fresh MockBrain)."""
+    b = brain if brain is not None else MockBrain()
+    return BrainRegistry(
+        projects=[Project(slug="repo", path=repo, primary=True)],
+        build_brain=lambda _: b,
+    )
+
+
 def test_plan_reviewer_endpoint(tmp_path: Path) -> None:
     """POST /specialists/plan-reviewer dispatches the specialist and returns its response."""
     mem = tmp_path / "mem"
     repo = _init_repo(tmp_path / "repo")
-    app = create_app(
-        brain=MockBrain(),
-        memory_root=mem,
-        repo_roots={"repo": repo},
-    )
+    app = create_app(registry=_registry_for(repo), memory_root=mem)
     client = TestClient(app)
     r = client.post(
         "/specialists/plan-reviewer",
@@ -51,7 +59,8 @@ def test_plan_reviewer_endpoint(tmp_path: Path) -> None:
 
 def test_plan_reviewer_endpoint_unknown_slug(tmp_path: Path) -> None:
     """Unknown project_slug returns 404 with a useful error message."""
-    app = create_app(brain=MockBrain(), memory_root=tmp_path, repo_roots={})
+    repo = _init_repo(tmp_path / "repo")
+    app = create_app(registry=_registry_for(repo), memory_root=tmp_path / "mem")
     client = TestClient(app)
     r = client.post(
         "/specialists/plan-reviewer",
@@ -61,9 +70,10 @@ def test_plan_reviewer_endpoint_unknown_slug(tmp_path: Path) -> None:
     assert "nonexistent" in r.json()["detail"]
 
 
-def test_plan_reviewer_endpoint_with_no_repo_roots(tmp_path: Path) -> None:
-    """When repo_roots kwarg is omitted, any slug returns 404."""
-    app = create_app(brain=MockBrain(), memory_root=tmp_path)
+def test_plan_reviewer_endpoint_with_empty_registry(tmp_path: Path) -> None:
+    """With a zero-project registry, any slug returns 404."""
+    registry = BrainRegistry(projects=[], build_brain=lambda _: MockBrain())
+    app = create_app(registry=registry, memory_root=tmp_path)
     client = TestClient(app)
     r = client.post(
         "/specialists/plan-reviewer",
@@ -77,10 +87,9 @@ def test_plan_reviewer_endpoint_with_matching_token(tmp_path: Path) -> None:
     mem = tmp_path / "mem"
     repo = _init_repo(tmp_path / "repo")
     app = create_app(
-        brain=MockBrain(),
+        registry=_registry_for(repo),
         memory_root=mem,
         auth_token="secret",
-        repo_roots={"repo": repo},
     )
     client = TestClient(app)
     r = client.post(
@@ -93,7 +102,8 @@ def test_plan_reviewer_endpoint_with_matching_token(tmp_path: Path) -> None:
 
 def test_plan_reviewer_endpoint_rejects_missing_fields(tmp_path: Path) -> None:
     """Missing required `name` or `project_slug` returns 422."""
-    app = create_app(brain=MockBrain(), memory_root=tmp_path)
+    repo = _init_repo(tmp_path / "repo")
+    app = create_app(registry=_registry_for(repo), memory_root=tmp_path / "mem")
     client = TestClient(app)
     r = client.post("/specialists/plan-reviewer", json={})
     assert r.status_code == 422
@@ -103,7 +113,7 @@ def test_plan_reviewer_endpoint_response_shape(tmp_path: Path) -> None:
     """Response matches SpecialistResponse schema exactly (name, summary, flags)."""
     mem = tmp_path / "mem"
     repo = _init_repo(tmp_path / "repo")
-    app = create_app(brain=MockBrain(), memory_root=mem, repo_roots={"repo": repo})
+    app = create_app(registry=_registry_for(repo), memory_root=mem)
     client = TestClient(app)
     r = client.post(
         "/specialists/plan-reviewer",
@@ -120,7 +130,7 @@ def test_plan_reviewer_endpoint_invokes_brain_once(tmp_path: Path) -> None:
     mem = tmp_path / "mem"
     repo = _init_repo(tmp_path / "repo")
     brain = MockBrain()
-    app = create_app(brain=brain, memory_root=mem, repo_roots={"repo": repo})
+    app = create_app(registry=_registry_for(repo, brain=brain), memory_root=mem)
     client = TestClient(app)
     client.post(
         "/specialists/plan-reviewer",

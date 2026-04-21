@@ -3,6 +3,10 @@
 Exposes ``create_app`` for tests and ``main`` as the console-script entry
 point. ``BearerAuthMiddleware`` protects every route except ``/health``
 (kept open so Tailscale/LAN health checks work without the token).
+
+Multi-project routing is delegated to :class:`BrainRegistry`: ``/brain/query``
+and ``/specialists/*`` look the brain up by slug, falling back to the
+registry's primary project when a request omits its slug.
 """
 
 from __future__ import annotations
@@ -22,8 +26,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
-from .brain.interface import BrainInterface
-from .config import Config
+from .brain.registry import BrainRegistry
 from .memory.layout import ensure_layout
 from .specialists.plan_reviewer import PlanReviewer
 
@@ -55,14 +58,38 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+def _peek_brain_class(registry: BrainRegistry) -> str:
+    """Return a brain-class label for ``/health`` without forcing a lazy build.
+
+    Preserves :class:`BrainRegistry`'s lazy-build property: if a primary brain
+    has been materialised, report its class name; if a primary is configured
+    but unbuilt, report ``"unbuilt"``; if no primary is configured, report
+    ``"none"``. We intentionally do NOT call ``brain_for`` here — that would
+    make ``/health`` construct a real ``ClaudeSDKBrain.with_tools(...)`` just
+    to report its type.
+    """
+    primary = registry.primary_slug()
+    if primary is None:
+        return "none"
+    if primary in registry.built_slugs():
+        return type(registry.brain_for(primary)).__name__
+    return "unbuilt"
+
+
 def create_app(
     *,
-    brain: BrainInterface,
+    registry: BrainRegistry,
     memory_root: Path,
     auth_token: str | None = None,
-    repo_roots: dict[str, Path] | None = None,
 ) -> FastAPI:
-    repo_roots = repo_roots or {}
+    """Build the FastAPI app that serves the daemon's HTTP surface.
+
+    Args:
+        registry: Per-slug brain registry. ``/brain/query`` and
+            ``/specialists/*`` route through here.
+        memory_root: Directory ensure-layout is called on at startup.
+        auth_token: Optional bearer token; ``None`` disables auth.
+    """
     ensure_layout(memory_root)
     app = FastAPI(title="reachy-ducky-daemon")
     app.add_middleware(BearerAuthMiddleware, token=auth_token)
@@ -71,19 +98,35 @@ def create_app(
     def health() -> HealthResponse:
         return HealthResponse(
             ok=True,
-            brain=type(brain).__name__,
+            brain=_peek_brain_class(registry),
             memory_ready=(memory_root / "ducky" / "soul.md").exists(),
+            projects=registry.slugs(),
         )
 
     @app.post("/brain/query", response_model=BrainResponse)
     async def brain_query(req: BrainRequest) -> BrainResponse:
+        slug = req.project_slug or registry.primary_slug()
+        if slug is None:
+            raise HTTPException(
+                status_code=400,
+                detail="no project_slug in request and no primary project configured",
+            )
+        try:
+            brain = registry.brain_for(slug)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown project: {slug}") from None
         return await brain.query(req)
 
     @app.post("/specialists/plan-reviewer", response_model=SpecialistResponse)
     async def plan_reviewer_route(req: SpecialistRequest) -> SpecialistResponse:
-        repo = repo_roots.get(req.project_slug)
-        if repo is None:
-            raise HTTPException(status_code=404, detail=f"unknown project: {req.project_slug}")
+        try:
+            brain = registry.brain_for(req.project_slug)
+            repo = registry.path_for(req.project_slug)
+        except KeyError:
+            raise HTTPException(
+                status_code=404,
+                detail=f"unknown project: {req.project_slug}",
+            ) from None
         return await PlanReviewer(brain=brain, repo=repo).review()
 
     return app
@@ -95,12 +138,24 @@ def main() -> None:
     import uvicorn
 
     from .brain.claude_sdk import ClaudeSDKBrain
+    from .brain.interface import BrainInterface
+    from .config import AppConfig
+    from .project import Project
 
     logging.basicConfig(level=logging.INFO)
-    cfg = Config.from_env()
+    cfg = AppConfig.load()
     cfg.warn_if_exposed_without_auth()
+
+    def build_brain(project: Project) -> BrainInterface:
+        return ClaudeSDKBrain.with_tools(
+            cwd=project.path,
+            memory_root=cfg.memory_root,
+            github_repo=project.github_repo,
+        )
+
+    registry = BrainRegistry(projects=cfg.projects, build_brain=build_brain)
     app = create_app(
-        brain=ClaudeSDKBrain(),
+        registry=registry,
         memory_root=cfg.memory_root,
         auth_token=cfg.auth_token,
     )

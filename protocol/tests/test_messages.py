@@ -58,9 +58,31 @@ def test_user_utterance_defaults_project_slug_to_none() -> None:
 
 def test_health_response_round_trip() -> None:
     """HealthResponse survives JSON round-trip with all fields intact."""
-    resp = HealthResponse(ok=True, brain="claude", memory_ready=True)
+    resp = HealthResponse(
+        ok=True,
+        brain="claude",
+        memory_ready=True,
+        projects=["reachy-ducky", "other"],
+    )
     clone = HealthResponse.model_validate_json(resp.model_dump_json())
     assert clone == resp
+
+
+def test_health_response_projects_defaults_to_empty() -> None:
+    """``projects`` defaults to an empty list so pre-registry callers still validate."""
+    resp = HealthResponse(ok=True, brain="Mock", memory_ready=False)
+    assert resp.projects == []
+
+
+def test_health_response_carries_project_slugs() -> None:
+    """The registry surfaces its watched slugs through the health contract."""
+    resp = HealthResponse(
+        ok=True,
+        brain="MockBrain",
+        memory_ready=True,
+        projects=["alpha", "beta"],
+    )
+    assert resp.projects == ["alpha", "beta"]
 
 
 def test_brain_request_rejects_unknown_fields() -> None:

@@ -57,3 +57,4 @@ class HealthResponse(_WireResponse):
     ok: bool
     brain: str
     memory_ready: bool
+    projects: list[str] = Field(default_factory=list)
