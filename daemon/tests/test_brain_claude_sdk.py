@@ -33,8 +33,11 @@ async def test_claude_sdk_brain_passes_user_prompt() -> None:
     """ClaudeSDKBrain forwards the user's utterance as the SDK prompt."""
     seen: dict[str, Any] = {}
 
-    async def fake_query(prompt: str, _options: Any) -> AsyncIterator[dict[str, Any]]:
+    async def fake_query(prompt: str, options: Any) -> AsyncIterator[dict[str, Any]]:  # noqa: ARG001
+        # `options` kept (not `_options`) because ClaudeSDKBrain.query calls
+        # sdk_query(..., options=options) as a keyword arg; renaming breaks the match.
         seen["prompt"] = prompt
+        _ = options  # mark intentionally unused
         yield {"type": "text", "text": "ack"}
 
     with patch("reachy_ducky_daemon.brain.claude_sdk.sdk_query", new=fake_query):
