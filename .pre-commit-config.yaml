@@ -36,12 +36,7 @@ repos:
         args: ["-ll"]
         files: "^(daemon|app|menubar|protocol)/src/.*\\.py$"
 
-  - repo: local
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.1
     hooks:
-      - id: gitnexus-detect-changes
-        name: gitnexus detect_changes (scope check)
-        entry: bash -c 'command -v npx >/dev/null && npx --no-install gitnexus detect-changes --scope staged --repo reachy-ducky 2>/dev/null || true'
-        language: system
-        pass_filenames: false
-        always_run: true
-        verbose: true
+      - id: gitleaks

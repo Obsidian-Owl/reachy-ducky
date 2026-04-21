@@ -14,7 +14,7 @@ uv run ruff format .        # format
 uv run mypy --strict daemon/src app/src menubar/src protocol/src
 uv run bandit -r daemon/src app/src menubar/src protocol/src -ll
 uv run pre-commit run --all-files
-npx gitnexus analyze --incremental   # refresh code index
+npx gitnexus analyze --skip-agents-md   # refresh code index (incremental by default)
 ```
 
 Integration tests (live Claude / OpenAI / HF): `uv run pytest -m integration` with relevant env vars.
@@ -56,7 +56,7 @@ protocol/    Shared Pydantic messages between daemon ↔ app
 | 1 | `Grep` | Known symbol or string |
 | 2 | `GitNexus impact()` | Before editing shared contracts: `BrainInterface`, `VoiceInterface`, `MotionDriver`, `protocol/*` |
 | 3 | `GitNexus cypher()` | "All implementors of X" |
-| 4 | `GitNexus detect_changes()` | Pre-commit scope verification |
+| 4 | `GitNexus detect_changes()` (MCP) | Check scope of unstaged/staged diffs during editing |
 
 **Always pass `repo: "reachy-ducky"`** to every GitNexus MCP call.
 

@@ -9,7 +9,7 @@ Use the cheapest tool that answers the question. Escalate only when it fails.
 | 1 | `Grep` | Known symbol, string, file pattern | 50 |
 | 2 | `GitNexus impact()` | Before editing shared contracts or cross-package symbols | 4,000 |
 | 3 | `GitNexus cypher()` | Structural queries Grep can't answer ("all implementors of X") | 1,000 |
-| 4 | `GitNexus detect_changes()` | Pre-commit scope verification | 500 |
+| 4 | `GitNexus detect_changes()` (MCP) | Check scope of unstaged/staged diffs during editing | 500 |
 
 **Auggie is deferred.** Re-evaluate when the repo crosses ~100 files.
 
@@ -43,12 +43,13 @@ The only tool that answers "what breaks if I change X?" Returns depth-grouped de
 - Test-only changes
 - Docstring or type-hint-only changes
 
-### `detect_changes()` — before committing
+### `detect_changes()` — scope check while editing
 
-Maps staged diffs to affected symbols. Cheap (~500 tokens) safety net.
+**MCP-only tool** (no CLI subcommand). Maps staged or unstaged diffs to affected symbols. Cheap (~500 tokens) safety net when you want to know what a change touches before you commit it.
 
 ```
 gitnexus_detect_changes({scope: "staged", repo: "reachy-ducky"})
+gitnexus_detect_changes({scope: "unstaged", repo: "reachy-ducky"})
 ```
 
 ### `cypher()` — structural queries
@@ -79,6 +80,7 @@ gitnexus_cypher({
 
 ## Maintenance
 
-- The PostToolUse hook runs `npx gitnexus analyze --incremental` after Python file edits; the index stays warm automatically.
-- If queries feel stale, run a full `npx gitnexus analyze` manually.
-- `.gitnexusignore` excludes `tests/`, `docs/`, `.venv/`, `dist/`, `build/`.
+- `gitnexus analyze` is **incremental by default**. The `-f/--force` flag forces a full re-index.
+- The PostToolUse hook runs `npx gitnexus analyze --skip-agents-md` after Python edits, in the background, so the index stays warm. `--skip-agents-md` preserves our hand-curated `CLAUDE.md`.
+- If queries feel stale, run `npx gitnexus analyze --force --skip-agents-md` manually.
+- `.gitnexusignore` excludes `tests/`, `docs/`, `.venv/`, `dist/`, `build/`, and other non-source trees.

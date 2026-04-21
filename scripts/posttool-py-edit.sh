@@ -29,10 +29,10 @@ case "$file_path" in
       uv run ruff format "$file_path" >/dev/null 2>&1 || true
     fi
 
-    # Kick off an incremental GitNexus re-analyze in the background so the index
-    # stays warm for impact()/cypher()/detect_changes() queries. Do not block.
+    # Kick off a GitNexus re-analyze in the background (incremental by default).
+    # `--skip-agents-md` preserves our hand-curated CLAUDE.md. Do not block.
     if command -v npx >/dev/null 2>&1; then
-      (nohup npx --no-install gitnexus analyze --incremental \
+      (nohup npx --no-install gitnexus analyze --skip-agents-md \
          >/tmp/reachy-ducky-gitnexus.log 2>&1 &) || true
     fi
     ;;
