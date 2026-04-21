@@ -7,6 +7,7 @@ point. ``BearerAuthMiddleware`` protects every route except ``/health``
 
 from __future__ import annotations
 
+import hmac
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -19,6 +20,11 @@ from .brain.interface import BrainInterface
 from .config import Config
 from .memory.layout import ensure_layout
 
+# /docs and /openapi.json are open by intent. In the Tailscale-primary
+# deployment envelope the schema disclosure is an acceptable trade for
+# discoverability. If you ever bind 0.0.0.0 outside Tailscale, reconsider.
+# Exact match only: "/health/" (trailing slash), "/Health", "/HEALTH"
+# all hit the Bearer gate. Fail-closed on path ambiguity is correct.
 _OPEN_PATHS = frozenset({"/health", "/docs", "/openapi.json"})
 
 
@@ -36,7 +42,8 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         header = request.headers.get("authorization", "")
         if not header.startswith("Bearer "):
             return JSONResponse(status_code=401, content={"detail": "missing bearer token"})
-        if header.removeprefix("Bearer ").strip() != self._token:
+        presented = header.removeprefix("Bearer ").strip()
+        if not presented or not hmac.compare_digest(presented, self._token):
             return JSONResponse(status_code=401, content={"detail": "invalid bearer token"})
         return await call_next(request)
 

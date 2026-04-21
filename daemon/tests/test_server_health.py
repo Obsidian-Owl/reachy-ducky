@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from reachy_ducky_daemon.brain.mock import MockBrain
 from reachy_ducky_daemon.server import create_app
@@ -52,3 +53,25 @@ def test_protected_routes_require_bearer(tmp_path: Path) -> None:
     # branches above return before any route handler runs, so we can verify auth
     # denial on an unknown path without the route existing. The positive-path
     # assertion belongs with the Task 6.2 test suite.
+
+
+@pytest.mark.parametrize(
+    "header_value",
+    [
+        None,  # no header at all (already covered by test 3 first branch; keep for clarity)
+        "",  # empty header
+        "Basic abcdef",  # wrong scheme
+        "Bearer",  # scheme only, no token
+        "Bearer ",  # scheme + space, no token
+        "Bearer wrong",  # scheme + wrong token
+        "bearer secret",  # lowercase scheme (RFC says insensitive; current impl rejects; lock in)
+        "BEARER secret",  # uppercase scheme; ditto
+    ],
+)
+def test_protected_routes_reject_malformed_auth(tmp_path: Path, header_value: str | None) -> None:
+    """Auth middleware locks out anything that isn't exactly 'Bearer <token>'."""
+    app = create_app(brain=MockBrain(), memory_root=tmp_path, auth_token="secret")
+    client = TestClient(app)
+    headers = {"Authorization": header_value} if header_value is not None else {}
+    r = client.post("/brain/query", json={"user_utterance": "hi"}, headers=headers)
+    assert r.status_code == 401
