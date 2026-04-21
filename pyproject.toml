@@ -15,3 +15,28 @@ markers = [
     "hardware: requires Reachy Mini hardware",
     "integration: requires live external APIs",
 ]
+
+[tool.pyright]
+# Point Pyright at the workspace .venv so editable installs of the four
+# subpackages resolve. Without this, IDE (VS Code, Cursor) flags imports
+# like `reachy_ducky_protocol.messages` as unresolved even though mypy
+# and runtime are happy.
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
+include = [
+    "daemon/src",
+    "daemon/tests",
+    "app/src",
+    "app/tests",
+    "menubar/src",
+    "menubar/tests",
+    "protocol/src",
+    "protocol/tests",
+]
+extraPaths = [
+    "daemon/src",
+    "app/src",
+    "menubar/src",
+    "protocol/src",
+]
