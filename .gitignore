@@ -65,6 +65,10 @@ credentials*
 .gitnexus.db
 .gitnexus.duckdb
 
+# GitNexus auto-regenerates these skill files when it runs. They're upstream
+# GitNexus docs, not ours — each dev runs `npx gitnexus setup` locally.
+.claude/skills/gitnexus/
+
 # Node (for gitnexus via npx)
 node_modules/
 
