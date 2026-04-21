@@ -20,14 +20,18 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
-          version: "0.4.18"
+          version: "0.5.30"
           enable-cache: true
 
       - name: Set up Python
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --all-packages --all-extras
+        # --group dev installs workspace-wide dev tools (pytest, ruff, mypy,
+        # bandit, pytest-asyncio, pytest-httpx). We do NOT use --all-extras
+        # here because the app package's `robot` extra pulls reachy-mini,
+        # which has a broken Windows-only transitive dep.
+        run: uv sync --all-packages --group dev
 
       - name: Ruff lint
         run: uv run ruff check .

@@ -7,15 +7,17 @@
 ## Quick Start
 
 ```bash
-uv sync --all-packages      # install workspace
-uv run pytest -q            # unit tests (default tier)
-uv run ruff check --fix .   # lint + autofix
-uv run ruff format .        # format
+uv sync --all-packages --group dev   # install workspace + dev tools
+uv run pytest -q                     # unit tests (default tier)
+uv run ruff check --fix .            # lint + autofix
+uv run ruff format .                 # format
 uv run mypy --strict daemon/src app/src menubar/src protocol/src
 uv run bandit -r daemon/src app/src menubar/src protocol/src -ll
 lefthook run pre-commit --all-files
 npx gitnexus analyze --skip-agents-md   # refresh code index (incremental by default)
 ```
+
+On the robot only: `uv sync --all-packages --extra robot` additionally installs `reachy-mini` from the app package's `robot` extra.
 
 Integration tests (live Claude / OpenAI / HF): `uv run pytest -m integration` with relevant env vars.
 Hardware tests (Reachy Mini): `uv run pytest -m hardware`, requires connected robot.

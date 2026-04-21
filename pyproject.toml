@@ -1,6 +1,19 @@
 [tool.uv.workspace]
 members = ["daemon", "app", "menubar", "protocol"]
 
+# PEP 735 dependency groups — workspace-wide dev tools. Subpackages no longer
+# each carry their own `[project.optional-dependencies].dev`. Install with:
+#   uv sync --all-packages --group dev
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.23,<0.26",
+    "pytest-httpx>=0.30,<0.35",
+    "ruff>=0.6,<0.8",
+    "mypy>=1.11,<1.15",
+    "bandit>=1.7,<1.9",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

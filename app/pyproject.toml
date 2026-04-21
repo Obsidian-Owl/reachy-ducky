@@ -11,18 +11,11 @@ dependencies = [
     "numpy>=1.26,<3",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8,<9",
-    "pytest-asyncio>=0.23,<0.26",
-    "pytest-httpx>=0.30,<0.35",
-    "ruff>=0.6,<0.8",
-    "mypy>=1.11,<1.15",
-]
 # reachy-mini has a broken Windows-only transitive dep (gstreamer-msvc-runtime)
 # that prevents install on non-Windows. The app package is primarily deployed
 # to the Reachy Mini (Linux/aarch64); use `uv sync --extra robot` on the
 # robot. Mac dev does not need reachy-mini for unit tests.
+[project.optional-dependencies]
 robot = ["reachy-mini>=1.0.0rc1,<2"]
 
 [build-system]

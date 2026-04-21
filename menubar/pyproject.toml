@@ -7,7 +7,6 @@ dependencies = ["reachy-ducky-protocol", "httpx>=0.27,<0.29"]
 # rumps is macOS-only; install in an extra so non-Darwin CI can still resolve
 # the workspace. Code that imports rumps must itself be guarded (see Task 7).
 [project.optional-dependencies]
-dev = ["pytest>=8,<9", "ruff>=0.6,<0.8", "mypy>=1.11,<1.15"]
 macos = ["rumps>=0.4,<0.5"]
 
 [project.scripts]
