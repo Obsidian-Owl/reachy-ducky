@@ -48,9 +48,10 @@ from reachy_ducky_daemon.brain.interface import BrainInterface
 # by its underscore name across modules is unconventional but here it's
 # deliberate: promoting ``_list_plans`` to a public ``list_plans`` would
 # require touching every existing test import, and duplicating the logic
-# would create a drift surface between specialist and MCP tool. A pure
-# helper is cheap to share; the indirection note lives here so reviewers
-# see the coupling is intentional.
+# would create a drift surface between specialist and MCP tool.
+# TODO(#4): promote `_list_plans` to public `list_plans` before the 2nd
+# Phase A specialist lands, so this cross-subpackage private import doesn't
+# become precedent.
 from reachy_ducky_daemon.brain.plans_mcp import _list_plans
 
 __all__ = ["PlanReviewer"]
@@ -113,6 +114,10 @@ def _capture_diff(repo: Path, branch: str) -> tuple[str, str | None]:
     Both paths are ``check=False``; a git failure becomes a diagnostic
     string in the returned ``error`` rather than a raised exception.
     """
+    # TODO(#3): add test coverage for the merge-base-failure fallback branch
+    # below (feature branch + `main` ref absent). Also prepend a "using
+    # working-tree-vs-HEAD fallback" banner to the returned diff text when
+    # this path engages so the brain can distinguish fallback from primary.
     if branch != "main":
         try:
             proc = _run_git(["diff", "main...HEAD"], cwd=repo)
@@ -149,6 +154,10 @@ def _collect_plans(repo: Path) -> list[tuple[str, str]]:
     diagnostic, and bubbling the error up would defeat the "no
     exceptions escape to callers" design constraint.
     """
+    # TODO(#5): instead of silently skipping, accumulate (rel, error_string)
+    # entries and surface them under an "=== UNREADABLE PLANS ===" prompt
+    # header. Current silent skip is asymmetric with `_capture_diff` and
+    # `_current_branch` (both surface errors as diagnostics).
     out: list[tuple[str, str]] = []
     for rel in _list_plans(repo):
         try:
@@ -172,6 +181,11 @@ def _assemble_prompt(
     and uppercase labels) so the brain's attention has fixed landmarks
     between the plan block and the diff block. The directive goes last
     so it sits closest to where the model starts generating.
+
+    TODO(#2): add per-file and total byte caps with a truncation marker.
+    Repos with many large plans risk silent context-window overflow at
+    the SDK layer; a marked in-prompt truncation is better than opaque
+    SDK-level cutoff.
     """
     parts: list[str] = []
     parts.append(f"Branch: {branch}")
