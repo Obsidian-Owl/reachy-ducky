@@ -1450,6 +1450,8 @@ git commit -m "feat(daemon): add plan-reviewer specialist (first subagent)"
 - Create: `daemon/src/reachy_ducky_daemon/config.py`
 - Test: `daemon/tests/test_server_health.py`
 
+**Auth posture:** the daemon binds localhost by default. Multi-device operation (Reachy ↔ Mac) is expected to go over **Tailscale** (see Task 13.2). If the user opts to bind the daemon to a non-loopback host and sets `REACHY_DUCKY_AUTH_TOKEN`, a bearer-token middleware protects every route except `/health`. If bound to a non-loopback host *without* a token, the daemon logs a loud warning on startup — users who know what they're doing can ignore it (e.g., local tests), but the warning makes accidental exposure visible.
+
 **Step 1: Write the failing test**
 
 ```python
@@ -1469,6 +1471,31 @@ def test_health_ok(tmp_path):
     assert data["ok"] is True
     assert data["brain"] == "MockBrain"
     assert data["memory_ready"] is True
+
+
+def test_health_open_even_with_auth_token(tmp_path):
+    """/health is intentionally open so Tailscale/LAN health checks don't need the token."""
+    app = create_app(brain=MockBrain(), memory_root=tmp_path, auth_token="secret")
+    client = TestClient(app)
+    r = client.get("/health")
+    assert r.status_code == 200
+
+
+def test_protected_routes_require_bearer(tmp_path):
+    """When auth_token is set, non-/health routes require a matching Authorization header."""
+    app = create_app(brain=MockBrain(), memory_root=tmp_path, auth_token="secret")
+    client = TestClient(app)
+
+    # No header → 401
+    r = client.post("/brain/query", json={"user_utterance": "hi"})
+    assert r.status_code == 401
+
+    # Wrong token → 401
+    r = client.post("/brain/query", json={"user_utterance": "hi"}, headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 401
+
+    # Right token → reaches the route (added in Task 6.2; this test may need to be
+    # re-run after Task 6.2 ships the endpoint).
 ```
 
 **Step 2: Run to verify it fails**
@@ -1482,9 +1509,14 @@ Expected: FAIL.
 # daemon/src/reachy_ducky_daemon/config.py
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 @dataclass
@@ -1492,6 +1524,7 @@ class Config:
     memory_root: Path
     host: str = "127.0.0.1"
     port: int = 8765
+    auth_token: str | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -1499,7 +1532,21 @@ class Config:
             "REACHY_DUCKY_MEMORY_ROOT",
             str(Path.home() / ".reachy-ducky" / "memory"),
         ))
-        return cls(memory_root=root)
+        host = os.environ.get("REACHY_DUCKY_DAEMON_HOST", "127.0.0.1")
+        port = int(os.environ.get("REACHY_DUCKY_DAEMON_PORT", "8765"))
+        token = os.environ.get("REACHY_DUCKY_AUTH_TOKEN") or None
+        return cls(memory_root=root, host=host, port=port, auth_token=token)
+
+    def warn_if_exposed_without_auth(self) -> None:
+        """Print a loud warning if the daemon is bound off loopback with no token."""
+        if self.host not in _LOOPBACK_HOSTS and self.auth_token is None:
+            logger.warning(
+                "reachy-ducky-daemon is bound to %s with NO auth token. "
+                "Anyone on this network can invoke your Claude subscription and "
+                "read your code. Set REACHY_DUCKY_AUTH_TOKEN, or bind to a "
+                "Tailscale-only interface (recommended).",
+                self.host,
+            )
 ```
 
 ```python
@@ -1508,7 +1555,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from reachy_ducky_protocol.messages import HealthResponse
 
@@ -1516,10 +1565,37 @@ from .brain.interface import BrainInterface
 from .config import Config
 from .memory.layout import ensure_layout
 
+_OPEN_PATHS = frozenset({"/health", "/docs", "/openapi.json"})
 
-def create_app(*, brain: BrainInterface, memory_root: Path) -> FastAPI:
+
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    """When a token is configured, require Authorization: Bearer <token> on every
+    route except /health (kept open so Tailscale/LAN health checks still work)."""
+
+    def __init__(self, app, token: str | None) -> None:  # noqa: ANN001
+        super().__init__(app)
+        self._token = token
+
+    async def dispatch(self, request: Request, call_next) -> Response:  # noqa: ANN001
+        if self._token is None or request.url.path in _OPEN_PATHS:
+            return await call_next(request)
+        header = request.headers.get("authorization", "")
+        if not header.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="missing bearer token")
+        if header.removeprefix("Bearer ").strip() != self._token:
+            raise HTTPException(status_code=401, detail="invalid bearer token")
+        return await call_next(request)
+
+
+def create_app(
+    *,
+    brain: BrainInterface,
+    memory_root: Path,
+    auth_token: str | None = None,
+) -> FastAPI:
     ensure_layout(memory_root)
     app = FastAPI(title="reachy-ducky-daemon")
+    app.add_middleware(BearerAuthMiddleware, token=auth_token)
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
@@ -1533,12 +1609,20 @@ def create_app(*, brain: BrainInterface, memory_root: Path) -> FastAPI:
 
 
 def main() -> None:
+    import logging
+
     import uvicorn
 
     from .brain.claude_sdk import ClaudeSDKBrain
 
+    logging.basicConfig(level=logging.INFO)
     cfg = Config.from_env()
-    app = create_app(brain=ClaudeSDKBrain(), memory_root=cfg.memory_root)
+    cfg.warn_if_exposed_without_auth()
+    app = create_app(
+        brain=ClaudeSDKBrain(),
+        memory_root=cfg.memory_root,
+        auth_token=cfg.auth_token,
+    )
     uvicorn.run(app, host=cfg.host, port=cfg.port)
 ```
 
@@ -2544,7 +2628,7 @@ async def test_brain_query_posts_and_parses(httpx_mock):
         url="http://127.0.0.1:8765/brain/query",
         json={"text": "hello", "specialist_invoked": None},
     )
-    client = DaemonClient()
+    client = DaemonClient(base_url="http://127.0.0.1:8765")
     resp = await client.brain_query("hi")
     assert resp.text == "hello"
 
@@ -2555,9 +2639,33 @@ async def test_health(httpx_mock):
         url="http://127.0.0.1:8765/health",
         json={"ok": True, "brain": "MockBrain", "memory_ready": True},
     )
-    client = DaemonClient()
+    client = DaemonClient(base_url="http://127.0.0.1:8765")
     h = await client.health()
     assert h.ok is True
+
+
+@pytest.mark.asyncio
+async def test_auth_header_sent_when_token_configured(httpx_mock):
+    httpx_mock.add_response(
+        method="POST",
+        url="http://mac.tailnet.ts.net:8765/brain/query",
+        json={"text": "ok", "specialist_invoked": None},
+    )
+    client = DaemonClient(
+        base_url="http://mac.tailnet.ts.net:8765",
+        auth_token="secret",
+    )
+    await client.brain_query("hi")
+    sent = httpx_mock.get_request()
+    assert sent.headers["authorization"] == "Bearer secret"
+
+
+def test_from_env_reads_daemon_url_and_token(monkeypatch):
+    monkeypatch.setenv("DAEMON_URL", "http://mac.tailnet.ts.net:8765")
+    monkeypatch.setenv("DAEMON_AUTH_TOKEN", "tok")
+    client = DaemonClient.from_env()
+    assert client._base == "http://mac.tailnet.ts.net:8765"
+    assert client._token == "tok"
 ```
 
 **Step 2: Run to verify it fails**
@@ -2571,27 +2679,45 @@ Expected: FAIL.
 # app/src/reachy_ducky_app/daemon_client.py
 from __future__ import annotations
 
+import os
+
 import httpx
 
 from reachy_ducky_protocol.messages import BrainRequest, BrainResponse, HealthResponse
 
 
 class DaemonClient:
-    def __init__(self, base_url: str = "http://127.0.0.1:8765") -> None:
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8765",
+        auth_token: str | None = None,
+    ) -> None:
         self._base = base_url
+        self._token = auth_token
+
+    @classmethod
+    def from_env(cls) -> "DaemonClient":
+        return cls(
+            base_url=os.environ.get("DAEMON_URL", "http://127.0.0.1:8765"),
+            auth_token=os.environ.get("DAEMON_AUTH_TOKEN") or None,
+        )
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._token}"} if self._token else {}
 
     async def brain_query(self, text: str, project_slug: str | None = None) -> BrainResponse:
         async with httpx.AsyncClient(timeout=30.0) as http:
             r = await http.post(
                 f"{self._base}/brain/query",
                 json=BrainRequest(user_utterance=text, project_slug=project_slug).model_dump(),
+                headers=self._headers(),
             )
             r.raise_for_status()
             return BrainResponse.model_validate(r.json())
 
     async def health(self) -> HealthResponse:
         async with httpx.AsyncClient(timeout=2.0) as http:
-            r = await http.get(f"{self._base}/health")
+            r = await http.get(f"{self._base}/health")  # open route, no auth
             r.raise_for_status()
             return HealthResponse.model_validate(r.json())
 ```
@@ -2929,6 +3055,77 @@ See `docs/testing/2026-04-21-phase-a-e2e-procedure.md` for end-to-end smoke.
 git add README.md
 git commit -m "docs: document Phase A run and development instructions"
 git push
+```
+
+---
+
+### Task 13.2: Networking & auth section (Tailscale-primary)
+
+**Files:**
+- Modify: `README.md`
+
+The Reachy Mini (on your LAN) talks to the Mac daemon (on your Mac). The split-brain architecture needs a trusted channel between them. Default to **Tailscale**; document a **bearer-token fallback** for users who prefer not to install Tailscale.
+
+**Step 1: Append a "Networking & auth" section to `README.md`**
+
+```markdown
+## Networking & auth
+
+Reachy Ducky runs as two processes on two machines: a daemon on your Mac and an
+app on your Reachy Mini. They talk over HTTP. The default is localhost-only,
+which won't work across devices — so for real use you need a trusted channel.
+
+### Recommended: Tailscale (zero-trust mesh)
+
+1. Install Tailscale on your Mac and on your Reachy (`brew install tailscale` /
+   `curl -fsSL https://tailscale.com/install.sh | sh`). Run `sudo tailscale up`
+   on both. Both devices appear in your tailnet with MagicDNS names like
+   `dan-mac.taila1b2c.ts.net`.
+2. On the Mac, run the daemon with:
+   ```bash
+   REACHY_DUCKY_DAEMON_HOST=0.0.0.0 uv run reachy-ducky-daemon
+   ```
+   Tailscale's ACLs (and your firewall) restrict who can reach :8765 — only
+   devices on your tailnet.
+3. On the Reachy, set:
+   ```bash
+   DAEMON_URL=http://dan-mac.taila1b2c.ts.net:8765
+   ```
+
+No shared secret, no token rotation. If a device is lost, revoke it in the
+Tailscale admin console.
+
+### Alternative: bearer token over LAN
+
+If you'd rather not use Tailscale, you can run the daemon with a shared token.
+
+1. On the Mac:
+   ```bash
+   export REACHY_DUCKY_AUTH_TOKEN="$(openssl rand -hex 32)"
+   export REACHY_DUCKY_DAEMON_HOST=0.0.0.0
+   uv run reachy-ducky-daemon
+   ```
+2. On the Reachy, set the same token:
+   ```bash
+   DAEMON_URL=http://<your-mac>.local:8765
+   DAEMON_AUTH_TOKEN=<paste the same token>
+   ```
+3. The daemon requires `Authorization: Bearer <token>` on every route except
+   `/health`. Treat the token like a password — do not commit it.
+
+### Warning
+
+If you bind the daemon to a non-loopback host **without** setting
+`REACHY_DUCKY_AUTH_TOKEN`, the daemon logs a loud warning on startup. Anyone
+on the same network could invoke your Claude subscription and read your code.
+Either use Tailscale or set a token — never both off.
+```
+
+**Step 2: Commit**
+
+```bash
+git add README.md
+git commit -m "docs: document Tailscale + bearer-token networking options"
 ```
 
 ---
