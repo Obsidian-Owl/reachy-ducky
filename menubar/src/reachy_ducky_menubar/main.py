@@ -34,9 +34,12 @@ def main() -> None:
             "Install on a Mac with `uv sync --all-packages --extra macos`."
         )
     # Lazy import so non-Darwin CI can import this module without rumps.
-    # `rumps` ships no type stubs; it's only installed in the `macos` extra,
-    # hence the import-not-found ignore.
-    import rumps  # type: ignore[import-not-found]
+    # rumps is in the optional `macos` extra and ships no stubs / py.typed
+    # marker. Mypy silencing lives in the root pyproject.toml's
+    # [[tool.mypy.overrides]] section (module = "rumps") so the behaviour is
+    # consistent whether rumps is installed (macOS CI) or not (Linux CI,
+    # default dev venv).
+    import rumps
 
     app = _build_app(rumps)
     app.run()
