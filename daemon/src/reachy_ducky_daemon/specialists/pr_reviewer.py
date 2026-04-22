@@ -17,12 +17,39 @@ issues:read`` — even if an unexpected verb reached ``gh``, GitHub would
 
 from __future__ import annotations
 
+import json
 import subprocess  # nosec B404 — list-form read-only gh only; no shell
 from pathlib import Path
 
-__all__ = ["_GH_TIMEOUT_SECONDS", "_run_gh"]
+__all__ = [
+    "_GH_TIMEOUT_SECONDS",
+    "_PR_VIEW_FIELDS",
+    "_fetch_pr_metadata",
+    "_run_gh",
+]
 
 _GH_TIMEOUT_SECONDS = 30.0
+
+# Fields we request from ``gh pr view --json``. Kept as a module-level
+# constant so the test pinning the argv contract can reference it.
+_PR_VIEW_FIELDS = ",".join(
+    [
+        "number",
+        "title",
+        "body",
+        "state",
+        "mergeable",
+        "author",
+        "headRefName",
+        "baseRefName",
+        "url",
+        "labels",
+        "files",
+        "reviewDecision",
+        "headRefOid",
+        "closingIssuesReferences",
+    ]
+)
 
 
 def _run_gh(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -41,3 +68,34 @@ def _run_gh(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         text=True,
         timeout=_GH_TIMEOUT_SECONDS,
     )
+
+
+def _fetch_pr_metadata(
+    pr_number: int,
+    cwd: Path,
+) -> tuple[dict[str, object], str | None]:
+    """Return ``(metadata_dict, error_string_or_None)`` for one PR.
+
+    Invokes ``gh pr view <num> --json <fields>`` and parses the JSON
+    output. On non-zero exit or malformed JSON, returns ``({}, error)``
+    so the caller can surface the diagnostic in the prompt without
+    aborting the whole review (same pattern as
+    ``plan_reviewer._capture_diff``).
+    """
+    try:
+        proc = _run_gh(
+            ["pr", "view", str(pr_number), "--json", _PR_VIEW_FIELDS],
+            cwd=cwd,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {}, f"gh pr view {pr_number} failed: {exc}"
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip() or "non-zero exit"
+        return {}, f"gh pr view {pr_number} failed: {stderr}"
+    try:
+        parsed = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return {}, f"gh pr view {pr_number} emitted unparseable JSON: {exc}"
+    if not isinstance(parsed, dict):
+        return {}, f"gh pr view {pr_number} returned non-object JSON"
+    return parsed, None

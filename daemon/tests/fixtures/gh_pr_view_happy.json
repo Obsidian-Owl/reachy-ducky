@@ -1,0 +1,16 @@
+{
+  "number": 42,
+  "title": "feat: add retry logic",
+  "body": "Closes #15. Adds exponential backoff to the upload path.",
+  "state": "OPEN",
+  "mergeable": "MERGEABLE",
+  "author": {"login": "macattak"},
+  "headRefName": "feat-retry",
+  "baseRefName": "main",
+  "url": "https://github.com/Obsidian-Owl/reachy-ducky/pull/42",
+  "labels": [],
+  "files": [{"path": "src/upload.py", "additions": 20, "deletions": 3}],
+  "reviewDecision": "CHANGES_REQUESTED",
+  "headRefOid": "abc123def456",
+  "closingIssuesReferences": [{"number": 15, "title": "Upload flake on slow connections"}]
+}
