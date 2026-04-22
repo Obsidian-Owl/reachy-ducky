@@ -16,6 +16,7 @@ from reachy_ducky_daemon.specialists.pr_reviewer import (
     _GH_TIMEOUT_SECONDS,
     _fetch_diff,
     _fetch_pr_metadata,
+    _fetch_review_comments,
     _run_gh,
 )
 
@@ -138,3 +139,57 @@ def test_fetch_diff_surfaces_failure_as_diagnostic(tmp_path: Path) -> None:
 
     assert diff == ""
     assert err is not None and "no such PR" in err
+
+
+# ---------------------------------------------------------------------------
+# Review comments fetch
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_review_comments_calls_gh_api(tmp_path: Path) -> None:
+    """_fetch_review_comments hits /repos/{owner}/{repo}/pulls/{num}/comments."""
+    fixture = _FIXTURES / "gh_api_comments.json"
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=fixture.read_text(), stderr=""
+    )
+    with patch("subprocess.run", return_value=fake_proc) as m:
+        comments, err = _fetch_review_comments(
+            owner="Obsidian-Owl", repo="reachy-ducky", pr_number=42, cwd=tmp_path
+        )
+
+    assert err is None
+    assert len(comments) == 2
+    first_user = comments[0]["user"]
+    assert isinstance(first_user, dict)
+    assert first_user["login"] == "augment-code[bot]"
+    argv = m.call_args.args[0]
+    assert argv[:2] == ["gh", "api"]
+    assert "/repos/Obsidian-Owl/reachy-ducky/pulls/42/comments" in argv
+    assert "--paginate" in argv
+
+
+def test_fetch_review_comments_empty_on_failure(tmp_path: Path) -> None:
+    """404/auth/network failures return ``([], error)`` — no exception."""
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="", stderr="404 Not Found"
+    )
+    with patch("subprocess.run", return_value=fake_proc):
+        comments, err = _fetch_review_comments(owner="o", repo="r", pr_number=1, cwd=tmp_path)
+
+    assert comments == []
+    assert err is not None
+
+
+def test_fetch_review_comments_surfaces_non_list_json_as_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """GitHub returning a non-list (e.g. error envelope) becomes a diagnostic."""
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout='{"message": "API rate limit"}', stderr=""
+    )
+    with patch("subprocess.run", return_value=fake_proc):
+        comments, err = _fetch_review_comments(owner="o", repo="r", pr_number=1, cwd=tmp_path)
+
+    assert comments == []
+    assert err is not None
+    assert "non-list" in err.lower() or "unexpected" in err.lower()

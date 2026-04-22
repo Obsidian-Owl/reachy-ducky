@@ -26,6 +26,7 @@ __all__ = [
     "_PR_VIEW_FIELDS",
     "_fetch_diff",
     "_fetch_pr_metadata",
+    "_fetch_review_comments",
     "_run_gh",
 ]
 
@@ -117,3 +118,37 @@ def _fetch_diff(pr_number: int, cwd: Path) -> tuple[str, str | None]:
         stderr = proc.stderr.strip() or "non-zero exit"
         return "", f"gh pr diff {pr_number} failed: {stderr}"
     return proc.stdout, None
+
+
+def _fetch_review_comments(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    cwd: Path,
+) -> tuple[list[dict[str, object]], str | None]:
+    """Return ``(comments_list, error_or_None)`` via ``gh api ... --paginate``.
+
+    Line-level review comments are where Augment and Codex bots post
+    their critiques. Issue-style PR comments live at a separate endpoint
+    and are intentionally not fetched here — the digest focuses on
+    structured line-level concerns, not general PR chatter.
+
+    ``--paginate`` stitches multi-page responses transparently so large
+    PRs with many review threads don't silently drop trailing comments.
+    """
+    endpoint = f"/repos/{owner}/{repo}/pulls/{pr_number}/comments"
+    try:
+        proc = _run_gh(["api", endpoint, "--paginate"], cwd=cwd)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [], f"gh api {endpoint} failed: {exc}"
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip() or "non-zero exit"
+        return [], f"gh api {endpoint} failed: {stderr}"
+    try:
+        parsed = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return [], f"gh api {endpoint} emitted unparseable JSON: {exc}"
+    if not isinstance(parsed, list):
+        return [], f"gh api {endpoint} returned non-list JSON (unexpected shape)"
+    # Narrow the element type — every list entry should be a JSON object.
+    return [c for c in parsed if isinstance(c, dict)], None
