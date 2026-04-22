@@ -11,13 +11,14 @@ Status: Phase A MVP in progress.
 
 - Mac daemon: `uv run reachy-ducky-daemon` (first run: `uv run reachy-ducky init`
   to write `~/.reachy-ducky/config.toml` + `.env`).
-- Menu-bar (macOS only): `uv run reachy-ducky-menubar`. On Linux this raises
-  `ImportError` by design — `rumps` lives in the optional `macos` extra.
+- Menu-bar (macOS-only in Phase A — `rumps` lives in the optional `macos`
+  extra): `uv run reachy-ducky-menubar`.
 - Reachy app: one-click install from the on-robot dashboard after publishing
   via HF Spaces. The publish path is **unverified** in Phase A — see
-  `docs/testing/2026-04-21-phase-a-e2e-procedure.md` Known gaps §3.
+  `docs/testing/2026-04-21-phase-a-e2e-procedure.md` Known gaps §3. For
+  running the app locally during development, see `app/README.md`.
 - Wake-word detection is a no-op stub in Phase A (`MockWakeDetector`); saying
-  "Hey Ducky" does nothing today. The smoke procedure above shows how to
+  "Hey Ducky" does nothing today. The smoke procedure below shows how to
   exercise a turn without wake.
 
 See `docs/testing/2026-04-21-phase-a-e2e-procedure.md` for the full end-to-end
@@ -56,9 +57,11 @@ real use you need a trusted channel.
    ```
    Tailscale's ACLs (and your firewall) restrict who can reach :8765 — only
    devices on your tailnet.
-3. On the Reachy, point the app at the Mac's MagicDNS name:
+3. On the Reachy, point the app at the Mac's MagicDNS name (and set the
+   OpenAI key the Realtime voice needs — see `app/README.md`):
    ```bash
    DAEMON_URL=http://<your-mac>.<your-tailnet>.ts.net:8765
+   OPENAI_API_KEY=sk-...
    ```
 
 No shared secret, no token rotation. If a device is lost, revoke it in the
@@ -78,6 +81,7 @@ If you'd rather not use Tailscale, you can run the daemon with a shared token.
    ```bash
    DAEMON_URL=http://<your-mac>.local:8765
    DAEMON_AUTH_TOKEN=<paste the same token>
+   OPENAI_API_KEY=sk-...
    ```
 3. The daemon requires `Authorization: Bearer <token>` on every route except
    the three open paths `/health`, `/docs`, and `/openapi.json`. Treat the
@@ -89,7 +93,11 @@ If you bind the daemon to a non-loopback host **without** setting
 `REACHY_DUCKY_AUTH_TOKEN`, the daemon logs a loud warning on startup
 (`AppConfig.warn_if_exposed_without_auth` in
 `daemon/src/reachy_ducky_daemon/config.py`). Anyone on the same network could
-invoke your Claude subscription and read your code. Either use Tailscale or
-set a token — never both off.
+invoke your Claude subscription and read your code. Don't run exposed without
+at least one of Tailscale or a token.
 
-Licensed under Apache 2.0.
+`/docs` and `/openapi.json` are always open for discoverability, even with a
+token — acceptable inside Tailscale; reconsider if you ever bind publicly.
+
+For vulnerability reporting, see `SECURITY.md`. Python 3.12+ is required
+(workspace-wide). Licensed under Apache 2.0 — see `LICENSE`.
