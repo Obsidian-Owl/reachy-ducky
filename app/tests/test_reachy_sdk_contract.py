@@ -66,7 +66,9 @@ def test_reachy_mini_class_exposes_required_method(method_name: str) -> None:
     Side-effect proof: the ``hasattr`` consults the class's attribute
     table, which reflects the actual installed SDK version's surface.
     """
-    from reachy_mini import ReachyMini
+    # reachy-mini is installed only with `--extra robot` (robot + CI).
+    # Default dev venvs don't have it; pyright flags the missing import.
+    from reachy_mini import ReachyMini  # pyright: ignore[reportMissingImports]
 
     assert hasattr(ReachyMini, method_name), (
         f"reachy-mini SDK missing `{method_name}`. "

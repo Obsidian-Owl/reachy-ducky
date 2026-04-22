@@ -36,13 +36,17 @@ markers = [
 ]
 
 # Mypy per-module overrides. Keep this list short — one-liners for deps
-# that ship no stubs. Prefer real typing when available.
+# that ship no stubs OR that only install with an optional extra.
 #   rumps: macOS-only menu-bar lib, no stubs / py.typed. Used only from
 #          menubar.main via a lazy import behind `sys.platform == "darwin"`.
 #   mediapipe: face-detection backend used by app.embodiment.gaze; the
 #          upstream wheel ships no stubs / py.typed marker. The heavy
 #          import is deferred into gaze_loop (hardware-tier only), but
 #          mypy still needs this entry to resolve the module reference.
+#   reachy_mini: robot SDK, only installed under `--extra robot`. Present
+#          in CI for the sdk-contract job (app/tests/test_reachy_sdk_contract.py);
+#          absent in a default dev venv. Matches the inline pyright
+#          ignore on the same import.
 [[tool.mypy.overrides]]
 module = "rumps"
 ignore_missing_imports = true
@@ -51,6 +55,13 @@ ignore_missing_imports = true
 module = "mediapipe"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "reachy_mini"
+ignore_missing_imports = true
+
 # Pyright config lives in ./pyrightconfig.json (takes precedence over
 # [tool.pyright] here; pyrightconfig.json is more reliably live-reloaded
-# by IDE language servers).
+# by IDE language servers). Pyright doesn't support per-module
+# ignore_missing_imports like mypy; the inline `# pyright: ignore[...]`
+# comments at each optional-dep import site serve the same purpose —
+# grep for `reportMissingImports` to find them.

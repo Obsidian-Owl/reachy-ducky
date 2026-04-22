@@ -13,6 +13,7 @@ uv run pytest -q                     # unit tests (default tier)
 uv run ruff check --fix .            # lint + autofix
 uv run ruff format .                 # format
 uv run mypy --strict daemon/src app/src menubar/src protocol/src
+uv run pyright                       # second opinion on types; use CLI, not IDE diagnostics
 uv run bandit -r daemon/src app/src menubar/src protocol/src -ll
 lefthook run pre-commit --all-files
 npx gitnexus analyze --skip-agents-md   # refresh code index (incremental by default)

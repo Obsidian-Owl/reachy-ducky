@@ -62,7 +62,12 @@ async def gaze_loop(mini: object, driver: MotionDriver, *, fps: float = 5.0) -> 
 
     import mediapipe as mp
 
-    detector = mp.solutions.face_detection.FaceDetection(min_detection_confidence=0.5)
+    # mediapipe ships no py.typed marker; `mp.solutions` is a runtime-only
+    # attribute that pyright can't verify. Matches the mypy override for
+    # `mediapipe` in the root pyproject.toml.
+    detector = mp.solutions.face_detection.FaceDetection(  # pyright: ignore[reportAttributeAccessIssue]
+        min_detection_confidence=0.5
+    )
     period = 1.0 / fps
     try:
         while True:

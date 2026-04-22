@@ -507,14 +507,20 @@ async def test_read_plan_handler_returns_error_on_null_byte_in_path(
 def test_find_plans_tool_signature_has_no_project_root(tmp_path: Path) -> None:
     """find_plans tool input schema exposes no project_root — LLM cannot forge scope."""
     find_plans, _read_plan_tool = _make_plans_tools(tmp_path)
-    assert "project_root" not in find_plans.input_schema
+    # input_schema is typed `type | dict[str, Any]` by the SDK; `in` only
+    # works on the dict case, so narrow before testing membership.
+    schema = find_plans.input_schema
+    assert isinstance(schema, dict)
+    assert "project_root" not in schema
 
 
 def test_read_plan_tool_signature_has_no_project_root(tmp_path: Path) -> None:
     """read_plan exposes only rel_path — LLM cannot forge scope."""
     _find_plans, read_plan_tool = _make_plans_tools(tmp_path)
-    assert "project_root" not in read_plan_tool.input_schema
-    assert "rel_path" in read_plan_tool.input_schema
+    schema = read_plan_tool.input_schema
+    assert isinstance(schema, dict)
+    assert "project_root" not in schema
+    assert "rel_path" in schema
 
 
 async def test_find_plans_tool_scoped_to_root(tmp_path: Path) -> None:
