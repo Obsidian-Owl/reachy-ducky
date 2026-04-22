@@ -1,0 +1,35 @@
+[tool.uv.workspace]
+members = ["daemon", "app", "menubar", "protocol"]
+
+# PEP 735 dependency groups — workspace-wide dev tools. Subpackages no longer
+# each carry their own `[project.optional-dependencies].dev`. Install with:
+#   uv sync --all-packages --group dev
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.23,<0.26",
+    "pytest-httpx>=0.30,<0.35",
+    "pytest-cov>=5,<7",
+    "ruff>=0.6,<0.8",
+    "mypy>=1.11,<1.15",
+    "bandit>=1.7,<1.9",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["daemon/tests", "app/tests", "menubar/tests", "protocol/tests"]
+asyncio_mode = "auto"
+markers = [
+    "hardware: requires Reachy Mini hardware",
+    "integration: requires live external APIs",
+]
+
+# Pyright config lives in ./pyrightconfig.json (takes precedence over
+# [tool.pyright] here; pyrightconfig.json is more reliably live-reloaded
+# by IDE language servers).

@@ -61,9 +61,16 @@ Built incrementally: phase A ships conversational only; B adds event-driven obse
 
 ## 5. Thinking brain — pluggable
 
-**Default:** Claude Agent SDK (Python), called from the Mac daemon. Strong SWE reasoning, MCP ecosystem, prompt caching, subagent primitive.
+**Default:** Claude Agent SDK (Python), called from the Mac daemon. Strong SWE reasoning, MCP ecosystem, prompt caching, first-class subagents, hooks.
 
 **Pluggable by design.** `BrainInterface` abstraction so Codex CLI can be swapped in. Motivated by (a) the user uses both, (b) making the app re-usable for the Reachy Mini community.
+
+**Brain is a configured agent, not a text wrapper.** `ClaudeSDKBrain` constructs `ClaudeAgentOptions` with:
+- **Tools:** built-in `Read` / `Glob` / `Grep` (scoped via `cwd` + `add_dirs`) + `Bash` (gated by `PreToolUse` hook) + `mcp__github__*` (from `github/github-mcp-server --read-only`) + `mcp__plans__*` (in-process MCP via `create_sdk_mcp_server`).
+- **Lock-down:** `permission_mode="dontAsk"` + explicit `tools=[...]` (the real restrictor) + `disallowed_tools=["Write","Edit"]` belt-and-suspenders against [SDK issue #361](https://github.com/anthropics/claude-agent-sdk-python/issues/361) where `allowed_tools` is just an auto-approve rule.
+- **PreToolUse security hook:** rejects any `Bash` not matching the git read-only allowlist; rejects any `Read`/`Glob`/`Grep` path matching the secret blocklist (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `secrets/**`, `credentials*`).
+
+See [`docs/plans/2026-04-22-pattern-b-redesign.md`](2026-04-22-pattern-b-redesign.md) for the full rationale and trade-off analysis.
 
 ### Auth posture
 
@@ -87,12 +94,14 @@ Built incrementally: phase A ships conversational only; B adds event-driven obse
 
 ## 7. Observation layers
 
-Read-only tool belt that both the main brain and subagents share:
+Read-only tool surface assembled from SDK built-ins + official MCP servers + a project-specific in-process MCP + a `PreToolUse` security-gate hook. **No handcrafted Python subprocess wrappers.** See the [Pattern B redesign](2026-04-22-pattern-b-redesign.md) for why.
 
-- **Git:** `log`, `diff`, `show`, `status`, `branch`, `rev-parse` — filesystem reads, no write commands
-- **GitHub:** `gh pr view/list/diff/comments`, `gh run list/view`, `gh issue view`
-- **Filesystem:** scoped to the active project; reads only; respects privacy rules (§10)
-- **Plan/spec readers:** conventionally look for `docs/plans/**`, `specs/**`, `AGENTS.md`, `CLAUDE.md`, `SPEC.md`, branch-named plan files
+- **Git:** built-in `Bash` tool, gated by a `PreToolUse` hook that rejects any command not matching the read-only allowlist (`git status|diff|log|show|branch|rev-parse|ls-files|ls-tree|describe|rev-list`). Chosen over `mcp-server-git` because that server is still labeled "early development; subject to change."
+- **GitHub:** [`github/github-mcp-server`](https://github.com/github/github-mcp-server) (official, 29k stars) launched with `--read-only` + `--toolsets pull_requests,issues,actions,repos`. Spawned via `npx -y` and declared in `.mcp.json` so contributors get it for free.
+- **Filesystem:** built-in `Read` / `Glob` / `Grep`, scoped to the project via `cwd` + `add_dirs`. Same `PreToolUse` hook that gates Bash also rejects any path matching the secret blocklist (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `secrets/**`, `credentials*`).
+- **Plan/spec discovery:** in-process MCP server built with `create_sdk_mcp_server(name="plans", tools=[...])` — exposes `find_plans` (returns paths under `docs/plans/**`, `specs/**`, root `AGENTS.md` / `CLAUDE.md` / `SPEC.md`, `*.plan.md`) and `read_plan(path)`. Project conventions belong in the tool surface, not in a Python pre-assembler.
+
+**Specialists** (PlanReviewer, etc.) follow Pattern A — Python pre-loads deterministic context (e.g., the diff via subprocess `git diff`), then dispatches a constrained `AgentDefinition` subagent (`tools=["Read","Grep","Glob"]`, `max_turns=3`) for follow-up reads. Step ordering you can't trust the agent to follow stays in Python.
 
 ### Phase progression
 
@@ -149,7 +158,7 @@ Plus **ephemeral working-set memory** via Claude Agent SDK's `BetaAbstractMemory
 
 ### Roster
 
-Read-only, dispatched from the main brain when a question warrants deep analysis. Each gets its own context window.
+Read-only, dispatched from the main brain when a question warrants deep analysis. Each is an `AgentDefinition` (SDK first-class subagent) with restricted `tools=["Read","Grep","Glob"]` and a small `max_turns` budget; each is invoked by a Python wrapper that pre-loads load-bearing context (so step ordering doesn't depend on agent compliance).
 
 - **plan-reviewer** — reads branch plan/spec + current diff, flags deviations.
 - **test-gap-assessor** — reads plan + new code + tests, reports behaviors not covered, or tests that don't match the plan's concerns.

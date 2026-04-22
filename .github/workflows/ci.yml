@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-type-test:
+    name: Lint, type-check, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.30"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        # --group dev installs workspace-wide dev tools (pytest, ruff, mypy,
+        # bandit, pytest-asyncio, pytest-httpx). We do NOT use --all-extras
+        # here because the app package's `robot` extra pulls reachy-mini,
+        # which has a broken Windows-only transitive dep.
+        run: uv sync --all-packages --group dev
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format (check only)
+        run: uv run ruff format --check .
+
+      - name: Mypy (strict)
+        run: uv run mypy --strict daemon/src app/src menubar/src protocol/src
+
+      - name: Bandit (security)
+        run: uv run bandit -ll -r daemon/src app/src menubar/src protocol/src
+
+      - name: Pytest (unit tier)
+        run: uv run pytest -q
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"

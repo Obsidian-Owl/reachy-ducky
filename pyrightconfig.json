@@ -1,0 +1,27 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "include": [
+    "daemon/src",
+    "daemon/tests",
+    "app/src",
+    "app/tests",
+    "menubar/src",
+    "menubar/tests",
+    "protocol/src",
+    "protocol/tests"
+  ],
+  "extraPaths": [
+    "daemon/src",
+    "app/src",
+    "menubar/src",
+    "protocol/src"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    "dist",
+    "build"
+  ]
+}
