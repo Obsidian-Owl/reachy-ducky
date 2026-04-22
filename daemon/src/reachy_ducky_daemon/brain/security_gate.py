@@ -80,6 +80,46 @@ _COMPOUND_MARKERS: tuple[str, ...] = (
     "\n",
 )
 
+# Flags on allowed subcommands that either write files, escape the configured
+# scope, or inject arbitrary config that turns other flags into RCE. Denied
+# regardless of subcommand. Checked against each whitespace-separated token:
+# deny if token == prefix OR token starts with ``prefix=``.
+#
+# Rationale per flag:
+#   -o / --output*       — git log/show/diff can write formatted output to
+#                          an arbitrary file. "read-only" must mean no writes.
+#   -c                   — config override. Lets the caller inject
+#                          ``core.textconv``/``diff.*.textconv``/``ext-diff``
+#                          entries that are then invoked as commands by
+#                          git log/show/diff = RCE.
+#   -C                   — run as-if from a different directory: scope escape.
+#   --git-dir            — explicit alternative .git dir: scope escape.
+#   --work-tree          — explicit alternative worktree: scope escape.
+#   --exec               — runs an external command (e.g. git fetch --exec).
+#   --upload-pack /      — server-side variants for fetch/push; the target is
+#   --receive-pack         attacker-redirectable, making them RCE-adjacent.
+#   --textconv           — invokes the configured textconv filter = arbitrary
+#                          process execution driven by repo config.
+#   --ext-diff           — invokes the configured external diff driver =
+#                          same arbitrary-process hazard.
+_DENIED_FLAG_PREFIXES: tuple[str, ...] = (
+    "-o",
+    "--output",
+    "--output-indicator",
+    "--output-indicator-context",
+    "--output-indicator-new",
+    "--output-indicator-old",
+    "-c",
+    "-C",
+    "--git-dir",
+    "--work-tree",
+    "--exec",
+    "--upload-pack",
+    "--receive-pack",
+    "--textconv",
+    "--ext-diff",
+)
+
 # Patterns use fnmatch semantics (Python stdlib), NOT shell/zsh glob:
 #   * matches everything including path separators
 #   ** is treated identically to * (no recursive-directory meaning)
@@ -134,6 +174,21 @@ def _deny(reason: str) -> HookJSONOutput:
     }
 
 
+def _has_denied_flag(command: str) -> tuple[bool, str]:
+    """Return (denied, matched_flag) scanning each whitespace-separated token.
+
+    Matches a token exactly against any entry in :data:`_DENIED_FLAG_PREFIXES`,
+    and also matches the ``prefix=value`` form (e.g. ``--output=/tmp/x``,
+    ``-c core.textconv=/bin/sh``). The ``=`` form is required because git
+    accepts both ``--output file`` and ``--output=file``.
+    """
+    for token in command.split():
+        for prefix in _DENIED_FLAG_PREFIXES:
+            if token == prefix or token.startswith(prefix + "="):
+                return True, prefix
+    return False, ""
+
+
 def _is_allowed_bash(command: str) -> tuple[bool, str]:
     """Return (allowed, reason_if_denied) for a proposed Bash command."""
     if not command:
@@ -144,6 +199,13 @@ def _is_allowed_bash(command: str) -> tuple[bool, str]:
                 f"compound shell construct {marker!r} rejected; "
                 "only a single read-only git command is allowed"
             )
+    denied, flag = _has_denied_flag(command)
+    if denied:
+        return False, (
+            f"write-capable or scope-escaping flag {flag!r} rejected; "
+            "the gate allows only read-only git subcommands with their "
+            "read-only flags"
+        )
     if not _BASH_ALLOWLIST.match(command):
         return False, (
             "only read-only git subcommands are allowed "

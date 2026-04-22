@@ -104,6 +104,23 @@ BASH_CASES: list[tuple[str, bool, str]] = [
     ("git\u200bstatus", False, "zero-width space between git and subcommand rejected"),
     ("git\u00a0status", True, "non-breaking space treated as whitespace"),
     ("git\u3000status", True, "ideographic space treated as whitespace"),
+    # P1 from Codex re-review: flag-level denylist
+    ("git log --output=/tmp/out.log", False, "git log --output denied (writes file)"),
+    ("git log --output /tmp/out.log", False, "git log --output (space form) denied"),
+    ("git show --output=/tmp/x HEAD", False, "git show --output denied"),
+    ("git diff --output=file main", False, "git diff --output denied"),
+    ("git log -o /tmp/out", False, "git log -o short form denied"),
+    ("git diff --ext-diff", False, "git diff --ext-diff denied (invokes external filter)"),
+    ("git log --textconv", False, "git log --textconv denied (invokes filter)"),
+    ("git log -c core.textconv=/bin/sh", False, "git log -c config override denied"),
+    ("git log -c ext-diff.foo=cmd", False, "git log -c ext-diff override denied"),
+    ("git log -C /tmp/other-repo", False, "git log -C path override denied"),
+    ("git log --git-dir=/tmp/foo/.git", False, "git log --git-dir denied"),
+    ("git log --work-tree=/tmp/foo", False, "git log --work-tree denied"),
+    # confirm read-only flags still pass
+    ("git log --oneline -n 5", True, "git log --oneline still allowed"),
+    ("git log --pretty=format:%H", True, "git log --pretty still allowed"),
+    ("git diff main...HEAD -- path/to/file", True, "git diff with pathspec still allowed"),
 ]
 
 
