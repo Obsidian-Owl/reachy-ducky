@@ -197,7 +197,7 @@ def build_brain_options(
         tools.append("mcp__github__*")
 
     mcp_servers: dict[str, McpServerConfig] = {
-        "plans": plans_mcp_server(),
+        "plans": plans_mcp_server(cwd),
     }
     if github_repo is not None:
         mcp_servers["github"] = _build_github_mcp_config()

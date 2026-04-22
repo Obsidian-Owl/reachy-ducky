@@ -14,10 +14,9 @@ import pytest
 from reachy_ducky_daemon.brain.plans_mcp import (
     _CONVENTIONAL_PATTERNS,
     _list_plans,
+    _make_plans_tools,
     _read_plan,
-    find_plans,
     plans_mcp_server,
-    read_plan,
 )
 
 # ---------------------------------------------------------------------------
@@ -391,7 +390,8 @@ async def test_find_plans_tool_returns_text_block(tmp_path: Path) -> None:
     (tmp_path / "docs" / "plans" / "a.md").write_text("a")
     (tmp_path / "CLAUDE.md").write_text("claude")
 
-    result = await find_plans.handler({"project_root": str(tmp_path)})
+    find_plans, _read_plan_tool = _make_plans_tools(tmp_path)
+    result = await find_plans.handler({})
 
     content = result["content"]
     assert isinstance(content, list)
@@ -403,7 +403,8 @@ async def test_find_plans_tool_returns_text_block(tmp_path: Path) -> None:
 async def test_find_plans_tool_empty_result_has_placeholder(tmp_path: Path) -> None:
     """When no plans are found the text block reads ``(no plans found)``
     rather than being empty (easier for Claude to reason about)."""
-    result = await find_plans.handler({"project_root": str(tmp_path)})
+    find_plans, _read_plan_tool = _make_plans_tools(tmp_path)
+    result = await find_plans.handler({})
 
     content = result["content"]
     assert isinstance(content, list)
@@ -415,7 +416,8 @@ async def test_read_plan_tool_returns_text_block(tmp_path: Path) -> None:
     (tmp_path / "docs" / "plans").mkdir(parents=True)
     (tmp_path / "docs" / "plans" / "p.md").write_text("plan body")
 
-    result = await read_plan.handler({"project_root": str(tmp_path), "rel_path": "docs/plans/p.md"})
+    _find_plans, read_plan_tool = _make_plans_tools(tmp_path)
+    result = await read_plan_tool.handler({"rel_path": "docs/plans/p.md"})
 
     assert "isError" not in result
     content = result["content"]
@@ -429,9 +431,8 @@ async def test_read_plan_tool_surfaces_permission_error(tmp_path: Path) -> None:
     (tmp_path / "daemon" / "src").mkdir(parents=True)
     (tmp_path / "daemon" / "src" / "foo.py").write_text("x")
 
-    result = await read_plan.handler(
-        {"project_root": str(tmp_path), "rel_path": "daemon/src/foo.py"}
-    )
+    _find_plans, read_plan_tool = _make_plans_tools(tmp_path)
+    result = await read_plan_tool.handler({"rel_path": "daemon/src/foo.py"})
 
     assert result.get("isError") is True
     content = result["content"]
@@ -442,9 +443,8 @@ async def test_read_plan_tool_surfaces_permission_error(tmp_path: Path) -> None:
 
 async def test_read_plan_tool_surfaces_file_not_found(tmp_path: Path) -> None:
     """A missing plan file surfaces as isError=True with a file-not-found message."""
-    result = await read_plan.handler(
-        {"project_root": str(tmp_path), "rel_path": "docs/plans/missing.md"}
-    )
+    _find_plans, read_plan_tool = _make_plans_tools(tmp_path)
+    result = await read_plan_tool.handler({"rel_path": "docs/plans/missing.md"})
 
     assert result.get("isError") is True
     assert "error" in result["content"][0]["text"]
@@ -452,9 +452,8 @@ async def test_read_plan_tool_surfaces_file_not_found(tmp_path: Path) -> None:
 
 async def test_read_plan_tool_surfaces_escape_attempt(tmp_path: Path) -> None:
     """A path-escape attempt surfaces as isError=True rather than raising."""
-    result = await read_plan.handler(
-        {"project_root": str(tmp_path), "rel_path": "../../etc/passwd"}
-    )
+    _find_plans, read_plan_tool = _make_plans_tools(tmp_path)
+    result = await read_plan_tool.handler({"rel_path": "../../etc/passwd"})
 
     assert result.get("isError") is True
     assert "escapes project root" in result["content"][0]["text"]
@@ -474,9 +473,8 @@ async def test_read_plan_handler_returns_error_on_non_utf8_content(
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"\xff\xfe\x00\x01")  # invalid UTF-8
 
-    result = await read_plan.handler(
-        {"project_root": str(tmp_path), "rel_path": "docs/plans/binary.md"}
-    )
+    _find_plans, read_plan_tool = _make_plans_tools(tmp_path)
+    result = await read_plan_tool.handler({"rel_path": "docs/plans/binary.md"})
 
     assert result.get("isError") is True
     assert "content" in result
@@ -493,7 +491,8 @@ async def test_read_plan_handler_returns_error_on_null_byte_in_path(
     clause that escaped the handler; the widened ``(OSError,
     UnicodeDecodeError, ValueError)`` catches it cleanly.
     """
-    result = await read_plan.handler({"project_root": str(tmp_path), "rel_path": "..\x00/.env"})
+    _find_plans, read_plan_tool = _make_plans_tools(tmp_path)
+    result = await read_plan_tool.handler({"rel_path": "..\x00/.env"})
 
     assert result.get("isError") is True
     assert "content" in result
@@ -501,28 +500,78 @@ async def test_read_plan_handler_returns_error_on_null_byte_in_path(
 
 
 # ---------------------------------------------------------------------------
+# P1 from Codex re-review: server-bound scope (no LLM-forgeable root)
+# ---------------------------------------------------------------------------
+
+
+def test_find_plans_tool_signature_has_no_project_root(tmp_path: Path) -> None:
+    """find_plans tool input schema exposes no project_root — LLM cannot forge scope."""
+    find_plans, _read_plan_tool = _make_plans_tools(tmp_path)
+    assert "project_root" not in find_plans.input_schema
+
+
+def test_read_plan_tool_signature_has_no_project_root(tmp_path: Path) -> None:
+    """read_plan exposes only rel_path — LLM cannot forge scope."""
+    _find_plans, read_plan_tool = _make_plans_tools(tmp_path)
+    assert "project_root" not in read_plan_tool.input_schema
+    assert "rel_path" in read_plan_tool.input_schema
+
+
+async def test_find_plans_tool_scoped_to_root(tmp_path: Path) -> None:
+    """Server-bound root: find_plans returns only paths under the root the server was built for.
+
+    Regression lock-in for the P1 in Codex re-review: under the previous
+    contract the tool took ``project_root`` as an LLM-controlled argument, so
+    a prompt-injected brain could call ``find_plans(project_root="/")`` and
+    enumerate AGENTS.md/CLAUDE.md/SPEC.md anywhere readable. Binding the root
+    at construction time closes that door: the ``scoped`` server has no way
+    to see ``sibling/``'s plans because the parameter simply does not exist.
+    """
+    scoped = tmp_path / "scoped"
+    scoped.mkdir()
+    (scoped / "docs" / "plans").mkdir(parents=True)
+    (scoped / "docs" / "plans" / "inside.md").write_text("inside")
+    sibling = tmp_path / "sibling"
+    sibling.mkdir()
+    (sibling / "docs" / "plans").mkdir(parents=True)
+    (sibling / "docs" / "plans" / "outside.md").write_text("outside")
+
+    find_plans, _read_plan_tool = _make_plans_tools(scoped)
+    result = await find_plans.handler({})
+    text = result["content"][0]["text"]
+    assert "inside.md" in text
+    assert "outside.md" not in text
+
+
+# ---------------------------------------------------------------------------
 # create_sdk_mcp_server integration (hello-world wiring check)
 # ---------------------------------------------------------------------------
 
 
-def test_plans_mcp_server_config_shape() -> None:
+def test_plans_mcp_server_config_shape(tmp_path: Path) -> None:
     """The factory returns an McpSdkServerConfig with name='plans' and an instance."""
-    config = plans_mcp_server()
+    config = plans_mcp_server(tmp_path)
 
     assert config["type"] == "sdk"
     assert config["name"] == "plans"
     assert config["instance"] is not None
 
 
-def test_tool_objects_expose_expected_metadata() -> None:
-    """@tool-decorated wrappers carry the name/description used by the SDK."""
+def test_tool_objects_expose_expected_metadata(tmp_path: Path) -> None:
+    """@tool-decorated wrappers carry the name/description used by the SDK.
+
+    With the P1 re-review fix, ``project_root`` is no longer a tool argument;
+    it's closed over at server construction. ``find_plans`` takes no args;
+    ``read_plan`` takes only ``rel_path``.
+    """
+    find_plans, read_plan_tool = _make_plans_tools(tmp_path)
     assert find_plans.name == "find_plans"
     assert "plan" in find_plans.description.lower()
-    assert find_plans.input_schema == {"project_root": str}
+    assert find_plans.input_schema == {}
 
-    assert read_plan.name == "read_plan"
-    assert "plan" in read_plan.description.lower()
-    assert read_plan.input_schema == {"project_root": str, "rel_path": str}
+    assert read_plan_tool.name == "read_plan"
+    assert "plan" in read_plan_tool.description.lower()
+    assert read_plan_tool.input_schema == {"rel_path": str}
 
 
 def test_conventional_patterns_locked() -> None:
@@ -571,7 +620,7 @@ async def test_plans_mcp_server_dispatches_through_registered_handlers(
     (tmp_path / "docs" / "plans").mkdir(parents=True)
     (tmp_path / "docs" / "plans" / "a.md").write_text("alpha plan")
 
-    config = plans_mcp_server()
+    config = plans_mcp_server(tmp_path)
     instance = config["instance"]
 
     list_handler = instance.request_handlers[mcp_types.ListToolsRequest]
@@ -587,7 +636,7 @@ async def test_plans_mcp_server_dispatches_through_registered_handlers(
             method="tools/call",
             params=mcp_types.CallToolRequestParams(
                 name="find_plans",
-                arguments={"project_root": str(tmp_path)},
+                arguments={},
             ),
         )
     )
@@ -603,7 +652,7 @@ async def test_plans_mcp_server_dispatches_through_registered_handlers(
             method="tools/call",
             params=mcp_types.CallToolRequestParams(
                 name="read_plan",
-                arguments={"project_root": str(tmp_path), "rel_path": "docs/plans/a.md"},
+                arguments={"rel_path": "docs/plans/a.md"},
             ),
         )
     )
