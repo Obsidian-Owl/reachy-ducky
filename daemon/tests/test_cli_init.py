@@ -308,6 +308,61 @@ def test_invalid_slug_reprompts_until_valid(
     assert "slug" in result.output.lower()
 
 
+def test_init_wizard_rejects_duplicate_slug(
+    home: Path,
+    git_repo: Path,
+    second_git_repo: Path,
+    fake_claude_auth: _ConfigureClaudeAuth,
+) -> None:
+    """P2 from Codex re-review: duplicate slugs are caught at wizard time.
+
+    ``BrainRegistry.__init__`` raises ``ValueError`` when two configured
+    projects share a slug, so a wizard run that writes ``[alpha, alpha]``
+    produces a TOML that the daemon refuses to load. The wizard must
+    re-prompt instead, keeping ``reachy-ducky init`` success from implying a
+    non-bootable config.
+
+    Scripted flow:
+      1. first project  → slug=alpha, path=git_repo, no GH repo, primary=y, add=y
+      2. second project → slug=alpha (rejected as duplicate) →
+                          slug=beta, path=second_git_repo, no GH repo,
+                          primary=n, add=n
+    """
+    fake_claude_auth(logged_in=True)
+    script = "\n".join(
+        [
+            "",  # memory default
+            "",  # host default
+            "",  # port default
+            "",  # no auth token
+            "",  # no PAT
+            "alpha",  # project #1 slug
+            str(git_repo),  # project #1 path
+            "",  # no github_repo
+            "y",  # primary
+            "y",  # add another
+            "alpha",  # duplicate slug — rejected
+            "beta",  # accepted after re-prompt
+            str(second_git_repo),  # project #2 path
+            "",  # no github_repo
+            "n",  # not primary
+            "n",  # done
+            "",
+        ]
+    )
+    result = _invoke(script)
+    assert result.exit_code == 0, result.output
+
+    # User-visible complaint surfaces the conflict.
+    assert "already used" in result.output.lower()
+
+    cfg_path = home / ".reachy-ducky" / "config.toml"
+    with cfg_path.open("rb") as f:
+        data = tomllib.load(f)
+    # Two distinct slugs, in order; no duplicate alpha.
+    assert [p["slug"] for p in data["projects"]] == ["alpha", "beta"]
+
+
 def test_invalid_path_nonexistent_reprompts(
     home: Path,
     git_repo: Path,

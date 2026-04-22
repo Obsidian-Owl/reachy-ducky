@@ -205,7 +205,16 @@ def _collect_github_pat() -> str | None:
     return pat or None
 
 
-def _prompt_slug() -> str:
+def _prompt_slug(*, taken: frozenset[str] = frozenset()) -> str:
+    """Prompt for a project slug, re-prompting until the user enters a valid
+    unused slug.
+
+    ``taken`` is the set of slugs already registered by earlier projects in
+    the current wizard run. A collision here would otherwise produce a TOML
+    file that :class:`BrainRegistry.__init__` rejects with ``ValueError``,
+    leaving ``reachy-ducky init`` reporting success while the daemon can't
+    start.
+    """
     while True:
         slug = _ask("Project slug (lowercase kebab, e.g. 'reachy-ducky')")
         if not slug:
@@ -216,6 +225,13 @@ def _prompt_slug() -> str:
             typer.secho(
                 f"  invalid slug: must match {_PROJECT_SLUG_RE.pattern!r} "
                 "(lowercase kebab, starts alphanumeric).",
+                fg=typer.colors.YELLOW,
+            )
+            continue
+        if slug in taken:
+            typer.secho(
+                f"  slug {slug!r} is already used by an earlier project in this "
+                "wizard — pick a different one.",
                 fg=typer.colors.YELLOW,
             )
             continue
@@ -262,7 +278,10 @@ def _collect_projects() -> list[_ProjectConfig]:
     projects: list[_ProjectConfig] = []
     while True:
         typer.echo(f"\nProject #{len(projects) + 1}:")
-        slug = _prompt_slug()
+        # Slug must be unique across the run — BrainRegistry rejects duplicates
+        # at daemon startup, so a duplicate here would write a non-bootable
+        # config. Pass the set of already-used slugs so _prompt_slug re-prompts.
+        slug = _prompt_slug(taken=frozenset(p.slug for p in projects))
         path = _prompt_project_path()
         github_repo = _prompt_github_repo()
         is_primary = _confirm("  Mark this project as primary?", default=len(projects) == 0)
