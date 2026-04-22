@@ -1,0 +1,56 @@
+name: Bug report
+description: Something is broken or behaving unexpectedly
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Keep it short — one problem per issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What went wrong
+      description: A few sentences describing the actual behaviour.
+      placeholder: |
+        e.g. "daemon crashes on `/brain/query` when the project slug
+        contains a hyphen"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: How do I trigger it? Minimal repro preferred.
+      placeholder: |
+        1. `uv run reachy-ducky-daemon`
+        2. `curl -X POST /brain/query -d '{"project_slug":"my-repo",...}'`
+        3. Daemon logs: ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      placeholder: e.g. "200 OK with a BrainResponse"
+    validations:
+      required: false
+  - type: input
+    id: component
+    attributes:
+      label: Which component?
+      description: daemon / app / menubar / protocol / CI / other
+      placeholder: daemon
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, relevant package versions. `uv --version` and `python --version` are good starters.
+      placeholder: |
+        - macOS 15.1, Python 3.12.9
+        - `uv` 0.5.30
+        - reachy-mini 1.6.4 (if relevant)
+    validations:
+      required: false

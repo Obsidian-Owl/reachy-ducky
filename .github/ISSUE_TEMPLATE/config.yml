@@ -1,0 +1,3 @@
+# Allow blank issues — templates are a nudge, not a wall. For quick
+# tracking notes or drive-by thoughts, a blank issue is often right.
+blank_issues_enabled: true

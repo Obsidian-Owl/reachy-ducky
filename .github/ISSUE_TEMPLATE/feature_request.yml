@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose an enhancement or new capability
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, check the milestones page — the work may already be
+        scoped. https://github.com/Obsidian-Owl/reachy-ducky/milestones
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you solving?
+      description: Describe the user-facing need, not the implementation. "Why" before "what".
+      placeholder: |
+        e.g. "When I have multiple repos open in different worktrees,
+        Ducky can't tell which one I'm asking about, so it pulls context
+        from the wrong project."
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution
+      description: One or two paragraphs on the approach you have in mind. Pseudocode / config / protocol sketches welcome.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other ways did you consider? Why did you pick the one above?
+    validations:
+      required: false
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risks / trade-offs
+      description: Anything this would break, slow down, or make harder? Security / privacy implications?
+    validations:
+      required: false
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Suggested milestone
+      options:
+        - Backlog (unsized)
+        - v0.1.0 cleanup
+        - v0.1.0 release plumbing
+        - v0.1.0 hardware bring-up
+        - Post-v0.1.0 / Phase B
+    validations:
+      required: false
