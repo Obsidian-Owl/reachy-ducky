@@ -65,3 +65,32 @@ ignore_missing_imports = true
 # ignore_missing_imports like mypy; the inline `# pyright: ignore[...]`
 # comments at each optional-dep import site serve the same purpose —
 # grep for `reportMissingImports` to find them.
+
+[tool.coverage.run]
+# Coverage tracks only the shipped source trees — tests themselves
+# execute to completion by definition and inflate the numerator. The
+# four subpackages' src/ dirs are the units we actually ship.
+source = ["daemon/src", "app/src", "menubar/src", "protocol/src"]
+branch = true
+relative_files = true
+
+[tool.coverage.report]
+# Threshold locks the current baseline (90.61% combined statements +
+# branches at the time this landed; the table's rounded per-row 91%
+# is a different aggregate). 0.61pp buffer absorbs measurement
+# variance from new tests and import-time branching we can't stably
+# exercise. Bump when we're consistently >93%.
+fail_under = 90
+show_missing = true
+skip_covered = false
+exclude_also = [
+    # Pure typing imports never run.
+    "if TYPE_CHECKING:",
+    # ABCs by contract.
+    "raise NotImplementedError",
+    # Programmatic opt-outs for genuinely unreachable or
+    # platform-specific branches — grep these to audit.
+    "pragma: no cover",
+    # CLI entry points covered by integration/hardware tiers, not unit.
+    "if __name__ == .__main__.:",
+]
