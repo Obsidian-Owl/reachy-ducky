@@ -38,8 +38,9 @@ def main() -> None:
     # marker. Mypy silencing lives in the root pyproject.toml's
     # [[tool.mypy.overrides]] section (module = "rumps") so the behaviour is
     # consistent whether rumps is installed (macOS CI) or not (Linux CI,
-    # default dev venv).
-    import rumps
+    # default dev venv). Pyright doesn't support per-module ignore config,
+    # so silence inline for the CLI too.
+    import rumps  # pyright: ignore[reportMissingImports]
 
     app = _build_app(rumps)
     app.run()
