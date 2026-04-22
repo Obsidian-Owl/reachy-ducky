@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from reachy_ducky_app.main import ReachyDuckyApp, main
+from reachy_ducky_app.voice.audio_io import MicSource, MockMicSource, MockSpeakerSink, SpeakerSink
 from reachy_ducky_app.wake import MockWakeDetector, WakeDetector
 
 
@@ -134,6 +135,54 @@ async def test_run_async_closes_daemon_client_on_shutdown(
     )
 
     fake_daemon.aclose.assert_awaited_once()
+
+
+async def test_run_async_constructs_voice_with_default_mic_and_speaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app wires the default audio_io factories into OpenAIRealtimeVoice.
+
+    Guards the commit-3 wiring: ``_run_async`` must call
+    :func:`load_default_mic_source` and :func:`load_default_speaker_sink`
+    (the same pattern as ``load_default_wake_detector``) rather than
+    hard-coding Mock impls directly. When the hardware-backed factory
+    bodies land, ``main.py`` should require zero changes.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    mic_factory_calls = 0
+    speaker_factory_calls = 0
+
+    def _spy_mic_factory() -> MicSource:
+        nonlocal mic_factory_calls
+        mic_factory_calls += 1
+        return MockMicSource()
+
+    def _spy_speaker_factory() -> SpeakerSink:
+        nonlocal speaker_factory_calls
+        speaker_factory_calls += 1
+        return MockSpeakerSink()
+
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_mic_source",
+        _spy_mic_factory,
+    )
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_speaker_sink",
+        _spy_speaker_factory,
+    )
+
+    app = ReachyDuckyApp()
+    stop = threading.Event()
+    stop.set()
+
+    await asyncio.wait_for(
+        app._run_async(reachy_mini=object(), stop_event=stop),
+        timeout=0.5,
+    )
+
+    assert mic_factory_calls == 1
+    assert speaker_factory_calls == 1
 
 
 async def test_run_async_closes_daemon_client_even_when_turn_raises(

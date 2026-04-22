@@ -25,6 +25,7 @@ from .conversation import run_one_turn
 from .daemon_client import DaemonClient
 from .embodiment.motion_driver import ReachyMotionDriver
 from .embodiment.state_machine import EmbodimentStateMachine
+from .voice.audio_io import load_default_mic_source, load_default_speaker_sink
 from .voice.openai_realtime import OpenAIRealtimeVoice
 from .wake import WakeDetector, load_default_wake_detector
 
@@ -58,7 +59,10 @@ class ReachyDuckyApp:
         """
         driver = ReachyMotionDriver(reachy_mini)
         sm = EmbodimentStateMachine(driver=driver)
-        voice = OpenAIRealtimeVoice()
+        voice = OpenAIRealtimeVoice(
+            mic=load_default_mic_source(),
+            speaker=load_default_speaker_sink(),
+        )
         daemon = DaemonClient.from_env()
         wake = load_default_wake_detector()
 
