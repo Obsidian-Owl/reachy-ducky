@@ -1,13 +1,15 @@
-"""Tests for the pure pick_primary_face helper.
+"""Tests for the pure pick_primary_face helper and ``gaze_loop``'s fps guard.
 
 ``gaze_loop`` is hardware-tier (needs a real mini + mediapipe detector) and
 is exercised via ``@pytest.mark.hardware`` on the robot; these unit tests
-only cover the pure selection helper.
+cover the pure selection helper and the entry-guard validation of ``fps``.
 """
 
 from __future__ import annotations
 
-from reachy_ducky_app.embodiment.gaze import pick_primary_face
+import pytest
+from reachy_ducky_app.embodiment.gaze import gaze_loop, pick_primary_face
+from reachy_ducky_app.embodiment.motion_driver import MockMotionDriver
 
 
 def test_pick_primary_face_returns_none_for_empty_list() -> None:
@@ -63,3 +65,37 @@ def test_pick_primary_face_accepts_boundary_values() -> None:
         (1.0, 1.0, 0.9),
     ]
     assert pick_primary_face(detections_with_winner) == (1.0, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_gaze_loop_rejects_zero_fps() -> None:
+    """``fps=0`` must raise before any work (previously ZeroDivisionError)."""
+    driver = MockMotionDriver()
+    with pytest.raises(ValueError, match="must be positive"):
+        await gaze_loop(None, driver, fps=0)
+
+
+@pytest.mark.asyncio
+async def test_gaze_loop_rejects_negative_fps() -> None:
+    """Negative ``fps`` must raise (previously: tight loop, no error)."""
+    driver = MockMotionDriver()
+    with pytest.raises(ValueError, match="must be positive"):
+        await gaze_loop(None, driver, fps=-1)
+
+
+@pytest.mark.asyncio
+async def test_gaze_loop_guard_accepts_small_positive_fps() -> None:
+    """Positive ``fps`` is not rejected by the guard.
+
+    ``mini=None`` means the loop eventually fails with ``AttributeError``
+    when it hits ``mini.media.get_frame()`` — that's fine. The guard's
+    job is to *not* reject positive floats with the "must be positive"
+    ValueError; any downstream exception proves the guard let us through.
+    """
+    driver = MockMotionDriver()
+    with pytest.raises(Exception) as exc_info:
+        await gaze_loop(None, driver, fps=0.1)
+    # The guard must not be the thing that raised here.
+    assert not (
+        isinstance(exc_info.value, ValueError) and "must be positive" in str(exc_info.value)
+    )

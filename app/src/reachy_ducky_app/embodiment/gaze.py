@@ -48,7 +48,16 @@ async def gaze_loop(mini: object, driver: MotionDriver, *, fps: float = 5.0) -> 
 
     ``mediapipe`` is imported lazily so this module stays importable on dev
     machines where the runtime detector may not yet be exercised.
+
+    Raises:
+        ValueError: if ``fps <= 0``. Guarding at entry gives hardware-tier
+            callers a clear error instead of a downstream
+            :class:`ZeroDivisionError` (``fps=0``) or a silent tight loop
+            (``fps<0``).
     """
+    if fps <= 0:
+        raise ValueError(f"fps must be positive, got {fps}")
+
     import asyncio
 
     import mediapipe as mp
