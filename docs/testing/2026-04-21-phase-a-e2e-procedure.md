@@ -193,7 +193,6 @@ gaps" §1.
 `app/src/reachy_ducky_app/wake.py` ships `MockWakeDetector` as the
 default. `load_default_wake_detector()` returns it, and
 `ReachyDuckyApp._wake_triggered()` returns `False` unconditionally.
-No audio pump is wired.
 
 Consequence: saying "Hey Ducky" into the robot's mic does nothing.
 A turn is only invoked if you subclass `ReachyDuckyApp` and override
@@ -208,6 +207,20 @@ Workarounds for smoke-verifying the daemon + voice path without wake:
 - From any shell on the Mac, POST to `/brain/query` directly
   (see §1 "Protected-route sanity check"); that exercises the brain
   and tool surface without the robot in the loop.
+
+### 1b. Default audio I/O is silent mocks
+
+The voice layer is now structurally wired end-to-end — mic frames flow
+into `input_audio_buffer.append`, transcription events drive
+`get_user_text`, and `response.audio.delta` events are piped to
+`SpeakerSink.play()`. But `load_default_mic_source()` /
+`load_default_speaker_sink()` return `MockMicSource()` /
+`MockSpeakerSink()` today (silent mic, dropping speaker).
+
+Consequence: even once wake fires, the robot has no real mic input and
+no audible replies until `ReachyMicSource` / `ReachySpeakerSink` land
+(tracked as follow-up). Unit tests drive the full event flow with
+`MockMicSource(frames=[...])` + `MockSpeakerSink()` captures.
 
 ### 2. Menu-bar never shows `LISTENING` / `THINKING`
 
