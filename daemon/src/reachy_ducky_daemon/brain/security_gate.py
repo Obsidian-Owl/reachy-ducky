@@ -147,7 +147,7 @@ def _is_allowed_bash(command: str) -> tuple[bool, str]:
     if not _BASH_ALLOWLIST.match(command):
         return False, (
             "only read-only git subcommands are allowed "
-            "(status, diff, log, show, branch, rev-parse, ls-files, "
+            "(status, diff, log, show, rev-parse, ls-files, "
             "ls-tree, describe, rev-list)"
         )
     return True, ""
