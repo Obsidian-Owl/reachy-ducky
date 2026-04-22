@@ -198,10 +198,18 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
         finally:
             if not pump_task.done():
                 pump_task.cancel()
-                try:
-                    await pump_task
-                except asyncio.CancelledError:
-                    pass
+            # Always retrieve the pump's result/exception, even when the
+            # task already finished. If it raised (mic hardware failure)
+            # and we reached this finally via an early transcript return,
+            # the stored exception would otherwise be orphaned — Python
+            # emits "Task exception was never retrieved" and the real
+            # mic failure is silently swallowed. Re-raising here promotes
+            # the mic error over a stale transcript, which is the correct
+            # priority for hardware-level failures.
+            try:
+                await pump_task
+            except asyncio.CancelledError:
+                pass
 
     async def speak_text(self, text: str) -> None:
         """Ask the SDK to TTS-and-play ``text`` as the assistant turn.

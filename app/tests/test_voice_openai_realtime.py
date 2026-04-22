@@ -100,6 +100,21 @@ class _RaisingMicSource(MicSource):
         raise RuntimeError("mic lost")
 
 
+class _ImmediateRaisingMicSource(MicSource):
+    """Mic stub that raises synchronously on first access, before any ``yield``.
+
+    Unlike :class:`_RaisingMicSource`, this variant's generator body reaches
+    ``raise`` without any intervening ``await``, so the pump task completes
+    deterministically within its first scheduling slice. Used to exercise
+    the exact race Augment flagged: pump is ``done()`` with an exception
+    stored by the time ``get_user_text`` returns an early transcript.
+    """
+
+    async def frames(self) -> AsyncIterator[bytes]:
+        raise RuntimeError("mic dead")
+        yield b""  # pragma: no cover — unreachable; keeps the function an async generator
+
+
 def _make_response_done(
     status: Literal["completed", "cancelled", "failed", "incomplete", "in_progress"] = (
         "completed"
@@ -407,6 +422,37 @@ async def test_get_user_text_propagates_mic_errors() -> None:
     connection.input_audio_buffer.append.assert_awaited_once_with(
         audio=base64.b64encode(b"first").decode("ascii")
     )
+
+
+@pytest.mark.asyncio
+async def test_get_user_text_surfaces_mic_error_over_early_transcript_return() -> None:
+    """Finally retrieves a completed pump task's exception even on early return.
+
+    Augment PR #13 finding (medium): if the mic pump fails and a transcription
+    event arrives, the early ``return event.transcript`` path fires before the
+    inner pump-done check on line 185. The ``finally`` block must
+    unconditionally retrieve the pump task's stored exception — otherwise the
+    mic failure is silently swallowed (Python emits "Task exception was never
+    retrieved") and the caller gets a stale transcript from a broken mic.
+
+    A hardware-tier mic failure should supersede a stale transcript, so
+    ``get_user_text`` must exit with the ``RuntimeError``, not return ``"hi"``.
+    """
+    mic = _ImmediateRaisingMicSource()
+    speaker = MockSpeakerSink()
+    # Single transcription event. _ImmediateRaisingMicSource raises without
+    # any intervening await, so by the time the drain's pre-yield
+    # ``await asyncio.sleep(0)`` completes, pump_task is deterministically
+    # ``done()`` with RuntimeError stored.
+    connection = _FakeConnection(events=[_make_transcription_completed("hi")])
+
+    turn = OpenAIRealtimeVoiceTurn(connection, mic=mic, speaker=speaker)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="mic dead"):
+        await asyncio.wait_for(turn.get_user_text(), timeout=1.0)
+
+    # Pump raised before any append could fire.
+    assert connection.input_audio_buffer.append.await_count == 0
 
 
 @pytest.mark.asyncio
