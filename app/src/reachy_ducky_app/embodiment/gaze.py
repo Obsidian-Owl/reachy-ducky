@@ -72,8 +72,11 @@ async def gaze_loop(mini: object, driver: MotionDriver, *, fps: float = 5.0) -> 
                 dets: list[tuple[float, float, float]] = []
                 for d in results.detections or []:
                     bb = d.location_data.relative_bounding_box
-                    u = bb.xmin + bb.width / 2
-                    v = bb.ymin + bb.height / 2
+                    # mediapipe relative bboxes can extend outside [0, 1] for
+                    # partial faces at the frame edge; clamp so the robot
+                    # never tries to aim outside its motion envelope.
+                    u = min(1.0, max(0.0, bb.xmin + bb.width / 2))
+                    v = min(1.0, max(0.0, bb.ymin + bb.height / 2))
                     score = d.score[0] if d.score else 0.0
                     dets.append((u, v, score))
                 primary = pick_primary_face(dets)
