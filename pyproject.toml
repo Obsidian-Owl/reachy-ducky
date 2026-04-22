@@ -7,7 +7,7 @@ members = ["daemon", "app", "menubar", "protocol"]
 [dependency-groups]
 dev = [
     "pytest>=8,<9",
-    "pytest-asyncio>=0.23,<0.26",
+    "pytest-asyncio>=1.3.0,<2",
     "pytest-httpx>=0.30,<0.35",
     "pytest-cov>=7.1.0,<8",
     "ruff>=0.15.11,<0.16",
