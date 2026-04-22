@@ -3,17 +3,21 @@
 Wraps the OpenAI Python SDK's realtime WebSocket session behind our
 :class:`~reachy_ducky_app.voice.interface.VoiceInterface`. The SDK handles
 STT + TTS + turn-taking + barge-in at the protocol level; our job is to
-plumb the events through our narrow :class:`VoiceTurn` contract.
+plumb the events through our narrow :class:`VoiceTurn` contract and to
+shuttle raw PCM between the :class:`MicSource` / :class:`SpeakerSink`
+abstractions and the SDK's base64-framed audio events.
 
 **Not run in unit tests.** The stateful session methods require a live
 connection to OpenAI. Unit coverage is construction-shape only (API-key
-plumbing, model plumbing, export surface). One ``@pytest.mark.integration``
-smoke (gated by ``REACHY_DUCKY_RUN_INTEGRATION=1`` + ``OPENAI_API_KEY``)
-opens a real WebSocket session to validate the plumbing.
+plumbing, model plumbing, export surface) plus scripted-event drain /
+mic-pump tests that drive the turn through a fake ``AsyncRealtimeConnection``.
+One ``@pytest.mark.integration`` smoke (gated by
+``REACHY_DUCKY_RUN_INTEGRATION=1`` + ``OPENAI_API_KEY``) opens a real
+WebSocket session to validate the plumbing.
 
 Verified SDK shape (``openai==1.109.1``)
 -----------------------------------------
-The installed SDK diverges from the Phase A plan sketch in four places,
+The installed SDK diverges from the Phase A plan sketch in six places,
 so this module adapts:
 
 1. **Session open.** The plan sketch calls
@@ -37,7 +41,23 @@ so this module adapts:
    ``type`` literal is ``"conversation.item.input_audio_transcription.completed"``
    and whose ``.transcript`` attribute carries the text.
 
-4. **Response create/cancel.** ``conn.response.create(response=params)`` —
+4. **Mic in.** Raw PCM frames from the :class:`MicSource` are
+   base64-encoded and sent via
+   ``conn.input_audio_buffer.append(audio=<base64>)``. With the default
+   server-VAD ``turn_detection``, the server commits the buffer and
+   triggers transcription on its own — no explicit ``.commit()`` call is
+   needed from our side. We run the mic pump as a background task so it
+   runs concurrently with the event drain that waits for the final
+   transcription event; when the drain loop returns (or raises), the
+   pump is cancelled in ``finally``.
+
+5. **Speaker out.** Assistant TTS audio arrives as a stream of
+   ``ResponseAudioDeltaEvent`` (``response.output_audio.delta``) whose
+   ``.delta`` attribute is a base64-encoded PCM payload. We decode each
+   delta and forward the raw bytes to :meth:`SpeakerSink.play` — the
+   transport-tier implementation decides how to buffer and render.
+
+6. **Response create/cancel.** ``conn.response.create(response=params)`` —
    param field is ``output_modalities`` (not ``modalities`` as in the plan
    sketch). ``conn.response.cancel()`` — no arguments needed for the
    common barge-in case. The terminal server event for *any* response
@@ -72,17 +92,24 @@ returned a bare ``VoiceTurn`` and leaked the websocket on every turn.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
-from openai.types.realtime import RealtimeErrorEvent, ResponseDoneEvent
+from openai.types.realtime import (
+    RealtimeErrorEvent,
+    ResponseAudioDeltaEvent,
+    ResponseDoneEvent,
+)
 from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
     ConversationItemInputAudioTranscriptionCompletedEvent,
 )
 
+from .audio_io import MicSource, SpeakerSink
 from .interface import VoiceInterface, VoiceTurn
 
 if TYPE_CHECKING:
@@ -102,8 +129,16 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
     race with the outer ``async with`` and risk double-close.
     """
 
-    def __init__(self, connection: AsyncRealtimeConnection) -> None:
+    def __init__(
+        self,
+        connection: AsyncRealtimeConnection,
+        *,
+        mic: MicSource,
+        speaker: SpeakerSink,
+    ) -> None:
         self._connection = connection
+        self._mic = mic
+        self._speaker = speaker
         self._interrupted = False
 
     @property
@@ -112,27 +147,71 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
         return self._connection
 
     async def get_user_text(self) -> str:
-        """Iterate server events until the final user transcript arrives.
+        """Pump mic frames into the session; drain events for final transcript.
 
-        Returns the ``.transcript`` attribute of the first
-        ``conversation.item.input_audio_transcription.completed`` event.
-        Blocks until that event arrives; the SDK's async iterator handles
-        framing and keep-alives.
+        Two concurrent tasks run:
+
+        * A **mic pump** that iterates :meth:`MicSource.frames`,
+          base64-encodes each raw PCM frame, and calls
+          ``connection.input_audio_buffer.append(audio=<base64>)``.
+          With server-VAD turn_detection (the SDK default) the server
+          decides when speech has ended and commits the buffer itself.
+        * The **event drain** on ``self._connection``, which returns the
+          ``.transcript`` of the first
+          ``ConversationItemInputAudioTranscriptionCompletedEvent``.
+
+        The pump is a background :class:`asyncio.Task` and is cancelled
+        in ``finally`` when the drain loop exits — whether that's because
+        transcription completed, the connection closed without a final
+        event, or an exception unwound through the drain. If the pump
+        raises (e.g. the mic hardware disconnected) the exception is
+        surfaced to the caller via the awaited task's result during
+        cleanup.
         """
-        async for event in self._connection:
-            if isinstance(event, ConversationItemInputAudioTranscriptionCompletedEvent):
-                return event.transcript
-        # Iterator terminated (connection closed) without yielding a final
-        # transcript. Surface the empty string rather than raising so the
-        # caller can decide what to do with silence.
-        return ""
+
+        async def _pump_mic() -> None:
+            async for frame in self._mic.frames():
+                b64 = base64.b64encode(frame).decode("ascii")
+                await self._connection.input_audio_buffer.append(audio=b64)
+
+        pump_task = asyncio.create_task(_pump_mic())
+        try:
+            async for event in self._connection:
+                if isinstance(event, ConversationItemInputAudioTranscriptionCompletedEvent):
+                    return event.transcript
+                # If the mic pump has failed we want to see the error
+                # rather than waiting forever for a transcript that can
+                # never arrive — surface it promptly.
+                if pump_task.done() and not pump_task.cancelled():
+                    pump_exc = pump_task.exception()
+                    if pump_exc is not None:
+                        raise pump_exc
+            # Iterator terminated (connection closed) without yielding a
+            # final transcript. Let the pump run to completion so a mic
+            # failure surfaces in place of ordinary silence — without
+            # this yield the pump may never have been scheduled.
+            try:
+                await pump_task
+            except asyncio.CancelledError:
+                pass
+            return ""
+        finally:
+            if not pump_task.done():
+                pump_task.cancel()
+                try:
+                    await pump_task
+                except asyncio.CancelledError:
+                    pass
 
     async def speak_text(self, text: str) -> None:
         """Ask the SDK to TTS-and-play ``text`` as the assistant turn.
 
         Uses ``response.create`` with ``instructions=text`` and both audio +
         text output modalities. The SDK streams audio chunks over the
-        WebSocket; the transport layer (robot's speaker) handles playback.
+        WebSocket as ``response.output_audio.delta`` events
+        (:class:`ResponseAudioDeltaEvent`); each ``.delta`` field is a
+        base64-encoded PCM payload that we decode and forward to
+        :meth:`SpeakerSink.play`.
 
         Drains the connection's event iterator until the terminal
         ``response.done`` (completed / cancelled / failed / incomplete)
@@ -152,6 +231,10 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
             },
         )
         async for event in self._connection:
+            if isinstance(event, ResponseAudioDeltaEvent):
+                pcm = base64.b64decode(event.delta)
+                await self._speaker.play(pcm)
+                continue
             if isinstance(event, ResponseDoneEvent):
                 status = event.response.status
                 if status in ("failed", "incomplete"):
@@ -183,15 +266,26 @@ class OpenAIRealtimeVoice(VoiceInterface):
     ``api_key=`` is passed explicitly. Fails fast with :class:`ValueError`
     if neither source is populated — catching a missing credential at
     startup beats a cryptic WebSocket handshake error on first use.
+
+    ``mic`` and ``speaker`` are required. Production code wires them via
+    :func:`~reachy_ducky_app.voice.audio_io.load_default_mic_source` and
+    :func:`~reachy_ducky_app.voice.audio_io.load_default_speaker_sink`
+    (today a silent mock, eventually the Reachy hardware bindings).
+    Tests can pass :class:`MockMicSource` /
+    :class:`MockSpeakerSink` directly.
     """
 
     def __init__(
         self,
         model: str = "gpt-realtime",
         *,
+        mic: MicSource,
+        speaker: SpeakerSink,
         api_key: str | None = None,
     ) -> None:
         self._model = model
+        self._mic = mic
+        self._speaker = speaker
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not self._api_key:
             raise ValueError("OPENAI_API_KEY not set and no api_key= argument provided")
@@ -214,4 +308,8 @@ class OpenAIRealtimeVoice(VoiceInterface):
 
         client = AsyncOpenAI(api_key=self._api_key)
         async with client.realtime.connect(model=self._model) as connection:
-            yield OpenAIRealtimeVoiceTurn(connection)
+            yield OpenAIRealtimeVoiceTurn(
+                connection,
+                mic=self._mic,
+                speaker=self._speaker,
+            )
