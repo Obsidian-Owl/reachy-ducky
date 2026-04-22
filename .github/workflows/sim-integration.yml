@@ -44,13 +44,22 @@ jobs:
       # ``Dependency "cairo" not found (tried pkg-config and cmake)``.
       # Pollen's self-hosted runner has these pre-installed globally; we're
       # on a fresh GitHub-hosted runner so the install step is explicit.
-      - name: Install system headers for pygobject/pycairo
+      - name: Install system headers for pygobject/pycairo + MuJoCo
+        # Headers for the transitive build (cairo/gobject/glib) PLUS MuJoCo's
+        # headless renderer deps. MuJoCo 3.x picks EGL or OSMesa at runtime
+        # when no display is available; we install the EGL loader + mesa's
+        # software EGL/GL implementation so either path works on a bare
+        # ubuntu-latest runner.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libcairo2-dev \
             libgirepository1.0-dev \
-            libglib2.0-dev
+            libglib2.0-dev \
+            libegl1 \
+            libgl1 \
+            libosmesa6 \
+            libglfw3
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -74,12 +83,17 @@ jobs:
         run: uv pip install 'reachy-mini[mujoco]'
 
       - name: Start reachy-mini-daemon (sim, headless, localhost-only)
+        # Redirect stdout+stderr to a log file so we can surface it if the
+        # daemon dies during startup. The previous iteration backgrounded
+        # silently; when the daemon crashed we got 60s of "not running yet"
+        # polling with no signal about why.
         run: |
           uv run reachy-mini-daemon \
             --robot-name reachy_mini_sim \
             --sim \
             --headless \
-            --localhost-only &
+            --localhost-only \
+            > sim_daemon.log 2>&1 &
           echo $! > sim_daemon.pid
           echo "Daemon PID: $(cat sim_daemon.pid)"
 
@@ -88,17 +102,29 @@ jobs:
         # was brittle: ``"state": "running"`` (with whitespace) or any key
         # reordering would make the regex miss. ``jq -e`` exits non-zero on
         # a false predicate so we can use it directly as a condition.
+        #
+        # Early-exit if the daemon process has died so we fail in <10s with
+        # the daemon log instead of sitting through 20 polling attempts.
         run: |
+          DAEMON_PID="$(cat sim_daemon.pid)"
           for i in {1..20}; do
             if curl -sf http://localhost:8000/api/daemon/status \
                  | jq -e '.state == "running"' >/dev/null 2>&1; then
               echo "[OK] Sim daemon is running (attempt $i)"
               exit 0
             fi
+            if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+              echo "[ERROR] Daemon PID $DAEMON_PID is no longer alive"
+              echo "=== sim_daemon.log ==="
+              cat sim_daemon.log || echo "(no log)"
+              exit 1
+            fi
             echo "Attempt $i: daemon not running yet"
             sleep 3
           done
           echo "[ERROR] Sim daemon did not reach 'running' after 60s"
+          echo "=== sim_daemon.log ==="
+          cat sim_daemon.log || echo "(no log)"
           curl -s http://localhost:8000/api/daemon/status || echo "(no response)"
           exit 1
 
