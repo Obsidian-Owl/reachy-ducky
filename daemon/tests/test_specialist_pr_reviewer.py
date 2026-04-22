@@ -14,6 +14,8 @@ from unittest.mock import patch
 
 from reachy_ducky_daemon.specialists.pr_reviewer import (
     _GH_TIMEOUT_SECONDS,
+    _assemble_diagnostic_prompt,
+    _assemble_prompt,
     _current_branch,
     _derive_flags,
     _fetch_check_runs,
@@ -401,3 +403,107 @@ def test_derive_flags_emits_merge_conflict_from_mergeable_state() -> None:
         pr={"number": 1, "mergeable": "MERGEABLE"}, comments=[], check_runs=[]
     )
     assert "merge-conflict" not in flags_clean
+
+
+# ---------------------------------------------------------------------------
+# Prompt assembly
+# ---------------------------------------------------------------------------
+
+
+def test_assemble_prompt_includes_title_body_diff_comments_ci() -> None:
+    """Happy-path prompt contains PR title, body, diff, comments, CI, and directive."""
+    pr: dict[str, object] = {
+        "number": 42,
+        "title": "feat: add retry logic",
+        "body": "Closes #15. Adds exponential backoff to the upload path.",
+        "headRefName": "feat-retry",
+        "baseRefName": "main",
+        "url": "https://github.com/Obsidian-Owl/reachy-ducky/pull/42",
+    }
+    comments: list[dict[str, object]] = [
+        {
+            "user": {"login": "augment-code[bot]"},
+            "path": "src/upload.py",
+            "line": 42,
+            "body": "no jitter term on the retry",
+        }
+    ]
+    check_runs: list[dict[str, object]] = [
+        {"name": "mypy", "status": "completed", "conclusion": "success"}
+    ]
+
+    prompt = _assemble_prompt(
+        pr=pr,
+        diff="diff --git a/src/upload.py\n+x = 2\n",
+        comments=comments,
+        check_runs=check_runs,
+    )
+
+    # PR metadata anchors.
+    assert "#42" in prompt
+    assert "feat: add retry logic" in prompt
+    assert "Closes #15" in prompt
+    assert "feat-retry" in prompt
+    assert "main" in prompt
+    # Diff anchor.
+    assert "+x = 2" in prompt
+    # Comments: author login + file:line + body all present for referential precision.
+    assert "augment-code[bot]" in prompt
+    assert "src/upload.py" in prompt
+    assert "42" in prompt  # the line number (also the PR number; substring is fine)
+    assert "no jitter term" in prompt
+    # CI section: check name + conclusion.
+    assert "mypy" in prompt
+    assert "success" in prompt
+    # Stable section headers so the brain can anchor attention.
+    assert "=== PR BODY ===" in prompt
+    assert "=== DIFF ===" in prompt
+    assert "=== REVIEW COMMENTS ===" in prompt
+    assert "=== CI / CHECK RUNS ===" in prompt
+    assert "=== TASK ===" in prompt
+    # Directive anchor.
+    assert "synthes" in prompt.lower() or "digest" in prompt.lower()
+
+
+def test_assemble_prompt_handles_empty_optional_sections() -> None:
+    """Empty diff / no comments / no check-runs still produce a valid prompt."""
+    pr: dict[str, object] = {
+        "number": 1,
+        "title": "trivial",
+        "body": "",
+        "headRefName": "f",
+        "baseRefName": "main",
+    }
+    prompt = _assemble_prompt(pr=pr, diff="", comments=[], check_runs=[])
+    # Every section header is still present, with a marker explaining the emptiness.
+    assert "=== DIFF ===" in prompt
+    assert "(empty" in prompt.lower()
+    assert "=== REVIEW COMMENTS ===" in prompt
+    assert "(no line-level" in prompt.lower() or "no comments" in prompt.lower()
+    assert "=== CI / CHECK RUNS ===" in prompt
+    assert "no check" in prompt.lower()
+
+
+def test_assemble_diagnostic_prompt_explains_no_pr() -> None:
+    """Diagnostic prompt names the branch, says no PR, asks brain to investigate."""
+    prompt = _assemble_diagnostic_prompt(
+        branch="feat-orphan",
+        branch_error=None,
+        find_error=None,
+    )
+    assert "feat-orphan" in prompt
+    assert "no open pr" in prompt.lower() or "no pr" in prompt.lower()
+    # Directive asks brain to investigate with tools.
+    assert "investigate" in prompt.lower() or "check" in prompt.lower()
+    assert "=== TASK ===" in prompt
+
+
+def test_assemble_diagnostic_prompt_surfaces_sub_diagnostics() -> None:
+    """Sub-diagnostics (branch_error, find_error) show up so the brain has full context."""
+    prompt = _assemble_diagnostic_prompt(
+        branch="unknown",
+        branch_error="git rev-parse failed: fatal: not a git repository",
+        find_error="gh pr list --head unknown failed: authentication required",
+    )
+    assert "not a git repository" in prompt
+    assert "authentication required" in prompt

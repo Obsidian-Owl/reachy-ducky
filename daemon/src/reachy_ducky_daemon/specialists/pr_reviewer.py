@@ -24,6 +24,8 @@ from pathlib import Path
 __all__ = [
     "_GH_TIMEOUT_SECONDS",
     "_PR_VIEW_FIELDS",
+    "_assemble_diagnostic_prompt",
+    "_assemble_prompt",
     "_current_branch",
     "_derive_flags",
     "_fetch_check_runs",
@@ -33,6 +35,26 @@ __all__ = [
     "_find_pr_for_branch",
     "_run_gh",
 ]
+
+_DIRECTIVE = (
+    "Synthesize a short PR digest for the developer. Be terse and "
+    "referentially precise — cite file paths + line numbers, bot names, "
+    "CI job names. Cover: (1) does the diff match the PR body / linked "
+    "issues, (2) which bot comments are legit vs noisy, (3) CI & "
+    "merge-readiness, (4) your risk call (safe to merge / push a fix / "
+    "split). Do NOT re-review the diff line by line — Augment and Codex "
+    "already did. You are the synthesis layer; stay one level above their "
+    "output."
+)
+
+_DIAGNOSTIC_DIRECTIVE = (
+    "No open PR was found for this branch. Use mcp__github__list_pull_requests "
+    "(try state=all), git log / git show, and git status via the gated Bash "
+    "tool to investigate. Was there a merged or closed PR for this branch? "
+    "Is the branch even pushed to the remote? Are we actually checked out on "
+    "the branch the user thinks we are? Return a short, actionable "
+    "explanation — not an apology."
+)
 
 # GitHub check-run conclusion values that indicate failure. Used by
 # ``_derive_flags`` to emit the ``ci-red`` flag. ``cancelled`` and
@@ -318,3 +340,90 @@ def _derive_flags(
         flags.append("merge-conflict")
 
     return flags
+
+
+def _assemble_prompt(
+    pr: dict[str, object],
+    diff: str,
+    comments: list[dict[str, object]],
+    check_runs: list[dict[str, object]],
+) -> str:
+    """Build the review prompt.
+
+    Mirrors ``plan_reviewer._assemble_prompt``'s layout: stable section
+    headers (``=== FOO ===``) give the brain fixed attention anchors;
+    the synthesis directive sits last, closest to where generation
+    begins. Comment entries include author login + file:line so a
+    follow-up "tell me about that Augment comment" has anchors the
+    brain can ``Read`` directly.
+    """
+    parts: list[str] = []
+    parts.append(f"PR #{pr.get('number')}: {pr.get('title', '(no title)')}")
+    parts.append(f"Branch: {pr.get('headRefName')} → {pr.get('baseRefName')}")
+    url = pr.get("url")
+    if url:
+        parts.append(f"URL: {url}")
+    parts.append("")
+
+    parts.append("=== PR BODY ===")
+    body = pr.get("body")
+    parts.append(str(body) if body else "(empty)")
+    parts.append("")
+
+    parts.append("=== DIFF ===")
+    parts.append(diff if diff.strip() else "(empty diff)")
+    parts.append("")
+
+    parts.append("=== REVIEW COMMENTS ===")
+    if not comments:
+        parts.append("(no line-level review comments)")
+    else:
+        for c in comments:
+            user = c.get("user")
+            login = user.get("login", "unknown") if isinstance(user, dict) else "unknown"
+            path = c.get("path", "?")
+            line = c.get("line", "?")
+            body = c.get("body", "")
+            parts.append(f"--- {login} on {path}:{line} ---")
+            parts.append(str(body))
+    parts.append("")
+
+    parts.append("=== CI / CHECK RUNS ===")
+    if not check_runs:
+        parts.append("(no check runs)")
+    else:
+        for r in check_runs:
+            name = r.get("name", "?")
+            status = r.get("status", "?")
+            conclusion = r.get("conclusion", "?")
+            parts.append(f"- {name}: {status} / {conclusion}")
+    parts.append("")
+
+    parts.append("=== TASK ===")
+    parts.append(_DIRECTIVE)
+    return "\n".join(parts)
+
+
+def _assemble_diagnostic_prompt(
+    branch: str,
+    branch_error: str | None,
+    find_error: str | None,
+) -> str:
+    """Build the no-PR-found prompt.
+
+    Brain is expected to dig with its tool surface (``mcp__github__*``,
+    gated ``git`` Bash, Read/Grep/Glob) and explain *why* there's no PR
+    rather than hand back a review of nothing. Mirrors the "error as
+    prompt diagnostic" pattern from ``plan_reviewer._capture_diff``.
+    """
+    parts: list[str] = [f"Branch: {branch}"]
+    if branch_error is not None:
+        parts.append(f"(branch diagnostic: {branch_error})")
+    if find_error is not None:
+        parts.append(f"(lookup diagnostic: {find_error})")
+    parts.append("")
+    parts.append(f"No open PR was found for branch '{branch}'.")
+    parts.append("")
+    parts.append("=== TASK ===")
+    parts.append(_DIAGNOSTIC_DIRECTIVE)
+    return "\n".join(parts)
