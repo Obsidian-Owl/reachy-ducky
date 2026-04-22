@@ -34,6 +34,18 @@ Live-Claude integration tests run via `.github/workflows/integration.yml` (PR-wi
 
 Integration tests (live Claude / OpenAI / HF): `uv run pytest -m integration` with relevant env vars.
 Hardware tests (Reachy Mini): `uv run pytest -m hardware`, requires connected robot.
+SDK contract tests (`@pytest.mark.sdk`): `uv run pytest -m sdk` — require the reachy-mini SDK installed, no daemon. Introspect the `ReachyMini` class surface to catch upstream method renames before they hit real hardware. CI runs these automatically via `.github/workflows/sdk-contract.yml` on every PR.
+Sim tests (`@pytest.mark.sim`): local-only; require a running `reachy-mini-daemon --sim` on `localhost:8000`. No CI coverage today (reachy-mini's media stack doesn't cleanly spin up on GitHub-hosted ubuntu-latest — see history on the closed `cleanup/sim-tests` branch).
+
+Local sim dev flow:
+
+```bash
+# In one terminal:
+pip install 'reachy-mini[mujoco]'
+reachy-mini-daemon --robot-name reachy_mini_sim --sim --headless --localhost-only
+# In another (after setting up a @pytest.mark.sim test):
+uv run pytest -m sim -q
+```
 
 ---
 

@@ -25,9 +25,14 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["daemon/tests", "app/tests", "menubar/tests", "protocol/tests"]
 asyncio_mode = "auto"
+# Deselect tiers that need external setup by default. Opt in via
+# `-m <marker>`. Markers are declared below.
+addopts = "-m 'not sim and not sdk'"
 markers = [
     "hardware: requires Reachy Mini hardware",
     "integration: requires live external APIs",
+    "sim: requires a running reachy-mini-daemon --sim (pytest -m sim)",
+    "sdk: requires the reachy-mini SDK installed (no daemon); catches upstream API drift",
 ]
 
 # Mypy per-module overrides. Keep this list short — one-liners for deps
