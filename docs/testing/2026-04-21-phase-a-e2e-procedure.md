@@ -215,8 +215,12 @@ Workarounds for smoke-verifying the daemon + voice path without wake:
 poll loop (`main.py::_poll_loop`) only writes the local IDLE /
 MUTED state. There is no `/state` push from the robot or daemon.
 
-- TODO (follow-up issue): Menu-bar `DAEMON_URL` should become
-  env-overridable; currently hardcoded.
+- TODO (follow-up issue): Menu-bar daemon URL should become
+  env-overridable; currently hardcoded as `_DAEMON_URL_DEFAULT`
+  at `menubar/src/reachy_ducky_menubar/main.py:24`. Note this is
+  distinct from the Reachy-side `DAEMON_URL` env var (`daemon_client.py`)
+  which the robot process does read — same conceptual value, two
+  different wiring stories.
 
 ### 3. Reachy dashboard install is unverified
 
@@ -242,7 +246,7 @@ not the plan's draft. A follow-up issue should update the plan.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Menu-bar shows `🦆⚠` "daemon unreachable" | Daemon not running, or bound to a different host/port than `http://127.0.0.1:8765` | Start the daemon; or edit `menubar/src/reachy_ducky_menubar/main.py:24` — `DAEMON_URL` is not yet env-overridable in Phase A. |
+| Menu-bar shows `🦆⚠` "daemon unreachable" | Daemon not running, or bound to a different host/port than `http://127.0.0.1:8765` | Start the daemon; or edit `_DAEMON_URL_DEFAULT` in `menubar/src/reachy_ducky_menubar/main.py:24` — the menu-bar URL is not yet env-overridable in Phase A. |
 | `curl /brain/query` returns `401 {"detail":"missing bearer token"}` | `REACHY_DUCKY_AUTH_TOKEN` is set on the daemon; your curl didn't send `Authorization: Bearer <token>` | Add the header, or unset the env var and restart the daemon. |
 | `curl /brain/query` returns `401 {"detail":"invalid bearer token"}` | Token mismatch between daemon and caller | Re-source `~/.reachy-ducky/.env` in both shells. |
 | `curl /brain/query` returns `400 {"detail":"no project_slug in request and no primary project configured"}` | Wizard was not run, or no `primary = true` project in `config.toml` | Re-run `uv run reachy-ducky init`, or edit `~/.reachy-ducky/config.toml`. |
