@@ -44,18 +44,33 @@ jobs:
       # ``Dependency "cairo" not found (tried pkg-config and cmake)``.
       # Pollen's self-hosted runner has these pre-installed globally; we're
       # on a fresh GitHub-hosted runner so the install step is explicit.
-      - name: Install system headers for pygobject/pycairo + MuJoCo
-        # Headers for the transitive build (cairo/gobject/glib) PLUS MuJoCo's
-        # headless renderer deps. MuJoCo 3.x picks EGL or OSMesa at runtime
-        # when no display is available; we install the EGL loader + mesa's
-        # software EGL/GL implementation so either path works on a bare
-        # ubuntu-latest runner.
+      - name: Install system deps for reachy-mini + MuJoCo headless
+        # Three concern buckets on a bare ubuntu-latest runner:
+        #
+        # 1. Build-time: pygobject/pycairo need cairo/gobject/glib headers
+        #    to compile from source during `uv sync --extra robot`.
+        #
+        # 2. Import-time: `reachy_mini.media.gstreamer_udp_camera` calls
+        #    `gi.require_version("Gst", "1.0")` unconditionally at module
+        #    scope (even in sim mode). Without the GStreamer GI typelib
+        #    + base plugins + udpsrc the daemon crashes before binding.
+        #
+        # 3. Runtime: MuJoCo 3.x picks EGL or OSMesa at runtime when no
+        #    display is available; we install both loaders so either
+        #    path works.
+        #
+        # Pollen's self-hosted `ci-runner-linux` has all of these
+        # pre-installed globally — we're on a fresh GitHub-hosted runner
+        # so the install step is explicit.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libcairo2-dev \
             libgirepository1.0-dev \
             libglib2.0-dev \
+            gir1.2-gstreamer-1.0 \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
             libegl1 \
             libgl1 \
             libosmesa6 \
