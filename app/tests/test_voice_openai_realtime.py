@@ -93,11 +93,10 @@ async def test_start_turn_enters_and_exits_sdk_connect_manager(
     """
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
-    # Fake AsyncRealtimeConnection: minimal surface start_turn touches is
-    # `.session.update(...)`. The turn object stores it untouched.
+    # Fake AsyncRealtimeConnection: start_turn does not touch any of its
+    # attrs — it just yields it as the turn's .connection. A plain
+    # MagicMock is enough.
     fake_connection = MagicMock(name="AsyncRealtimeConnection")
-    fake_connection.session = MagicMock()
-    fake_connection.session.update = AsyncMock()
 
     # Fake AsyncRealtimeConnectionManager: an async context manager.
     connect_manager = MagicMock(name="AsyncRealtimeConnectionManager")
@@ -138,8 +137,6 @@ async def test_start_turn_exits_sdk_connect_manager_on_exception(
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     fake_connection = MagicMock(name="AsyncRealtimeConnection")
-    fake_connection.session = MagicMock()
-    fake_connection.session.update = AsyncMock()
 
     connect_manager = MagicMock(name="AsyncRealtimeConnectionManager")
     connect_manager.__aenter__ = AsyncMock(return_value=fake_connection)

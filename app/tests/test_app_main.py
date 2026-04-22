@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from reachy_ducky_app.main import ReachyDuckyApp, main
@@ -102,3 +103,79 @@ def test_main_exits_with_stopped_event(monkeypatch: pytest.MonkeyPatch) -> None:
     # it; belt-and-braces, the stop_event.set() inside main() guarantees the
     # loop body is skipped, so this returns synchronously.
     main()
+
+
+async def test_run_async_closes_daemon_client_on_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On shutdown, the app calls ``daemon.aclose()`` to release the pool.
+
+    Regression for bug I2: pools the httpx.AsyncClient across calls, so
+    it must be drained on stop. We mock ``DaemonClient.from_env`` to
+    return a spy whose ``aclose`` is an :class:`AsyncMock`, immediately
+    stop the event, and assert ``aclose`` was awaited exactly once.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    fake_daemon = MagicMock()
+    fake_daemon.aclose = AsyncMock()
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.DaemonClient.from_env",
+        MagicMock(return_value=fake_daemon),
+    )
+
+    app = ReachyDuckyApp()
+    stop = threading.Event()
+    stop.set()
+
+    await asyncio.wait_for(
+        app._run_async(reachy_mini=object(), stop_event=stop),
+        timeout=0.5,
+    )
+
+    fake_daemon.aclose.assert_awaited_once()
+
+
+async def test_run_async_closes_daemon_client_even_when_turn_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ``run_one_turn`` raises, ``daemon.aclose()`` must still be awaited.
+
+    Guards that the ``try/finally`` wraps the whole wake loop, so the
+    pool is drained on crash as well as clean shutdown.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    fake_daemon = MagicMock()
+    fake_daemon.aclose = AsyncMock()
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.DaemonClient.from_env",
+        MagicMock(return_value=fake_daemon),
+    )
+
+    class _BoomError(RuntimeError):
+        pass
+
+    async def _blowing_up(**kwargs: object) -> None:
+        raise _BoomError("turn failed")
+
+    monkeypatch.setattr("reachy_ducky_app.main.run_one_turn", _blowing_up)
+
+    stop = threading.Event()
+
+    class _OneShotApp(ReachyDuckyApp):
+        """Wake triggers once to drive the loop into ``run_one_turn``."""
+
+        def _wake_triggered(self, wake: WakeDetector) -> bool:
+            del wake
+            return True
+
+    app = _OneShotApp()
+
+    with pytest.raises(_BoomError):
+        await asyncio.wait_for(
+            app._run_async(reachy_mini=object(), stop_event=stop),
+            timeout=0.5,
+        )
+
+    fake_daemon.aclose.assert_awaited_once()

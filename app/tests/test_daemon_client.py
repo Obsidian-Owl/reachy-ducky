@@ -256,3 +256,151 @@ async def test_5xx_raises_http_status_error(httpx_mock: HTTPXMock) -> None:
     client = DaemonClient(base_url="http://127.0.0.1:8765")
     with pytest.raises(httpx.HTTPStatusError):
         await client.health()
+
+
+@pytest.mark.asyncio
+async def test_construction_builds_one_httpx_async_client() -> None:
+    """The client holds a single pooled ``httpx.AsyncClient`` in ``_http``.
+
+    Regression for bug I2: the old implementation opened a fresh
+    ``httpx.AsyncClient`` inside each endpoint method via
+    ``async with httpx.AsyncClient(timeout=...) as http``. Over Tailscale
+    that meant a TLS handshake per call. The pooled instance eliminates
+    that cost.
+    """
+    client = DaemonClient(base_url="http://127.0.0.1:8765")
+    assert isinstance(client._http, httpx.AsyncClient)
+    assert client._http.is_closed is False
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_underlying_client() -> None:
+    """``aclose()`` closes the pooled ``httpx.AsyncClient``."""
+    client = DaemonClient(base_url="http://127.0.0.1:8765")
+    assert client._http.is_closed is False
+    await client.aclose()
+    assert client._http.is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_aclose_is_idempotent() -> None:
+    """Calling ``aclose()`` twice does not raise — shutdown paths can be untidy."""
+    client = DaemonClient(base_url="http://127.0.0.1:8765")
+    await client.aclose()
+    await client.aclose()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_successive_calls_reuse_pooled_client(httpx_mock: HTTPXMock) -> None:
+    """All three endpoints use ``self._http``, not a fresh client per call.
+
+    The most direct assertion is that the identity of ``client._http``
+    does not change across calls, and that the instance is still open
+    after several requests have been made through it.
+    """
+    httpx_mock.add_response(
+        method="GET",
+        url="http://127.0.0.1:8765/health",
+        json={"ok": True, "brain": "X", "memory_ready": True, "projects": []},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url="http://127.0.0.1:8765/brain/query",
+        json={"text": "ok", "specialist_invoked": None},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url="http://127.0.0.1:8765/specialists/plan-reviewer",
+        json={"name": "plan-reviewer", "summary": "ok", "flags": []},
+    )
+
+    client = DaemonClient(base_url="http://127.0.0.1:8765")
+    pooled = client._http
+    try:
+        await client.health()
+        assert client._http is pooled
+        assert pooled.is_closed is False
+        await client.brain_query("hi")
+        assert client._http is pooled
+        assert pooled.is_closed is False
+        await client.plan_reviewer(project_slug="demo")
+        assert client._http is pooled
+        assert pooled.is_closed is False
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_brain_query_uses_sixty_second_timeout(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """``/brain/query`` preserves its 60s timeout after the pooling refactor.
+
+    Timeouts must be applied per-call (not set globally on the pooled
+    client) because each endpoint has a different budget. Verify via the
+    ``httpx.Request.extensions['timeout']`` shape that pytest-httpx
+    preserves.
+    """
+    httpx_mock.add_response(
+        method="POST",
+        url="http://127.0.0.1:8765/brain/query",
+        json={"text": "ok", "specialist_invoked": None},
+    )
+    client = DaemonClient(base_url="http://127.0.0.1:8765")
+    try:
+        await client.brain_query("hi")
+    finally:
+        await client.aclose()
+
+    sent = httpx_mock.get_request()
+    assert sent is not None
+    # httpx stores per-request timeout config in request.extensions["timeout"];
+    # it's a dict with connect/read/write/pool keys.
+    timeout = sent.extensions.get("timeout")
+    assert timeout is not None
+    assert timeout["read"] == pytest.approx(60.0)
+
+
+@pytest.mark.asyncio
+async def test_health_uses_two_second_timeout(httpx_mock: HTTPXMock) -> None:
+    """``/health`` preserves its 2s timeout after the pooling refactor."""
+    httpx_mock.add_response(
+        method="GET",
+        url="http://127.0.0.1:8765/health",
+        json={"ok": True, "brain": "X", "memory_ready": True, "projects": []},
+    )
+    client = DaemonClient(base_url="http://127.0.0.1:8765")
+    try:
+        await client.health()
+    finally:
+        await client.aclose()
+
+    sent = httpx_mock.get_request()
+    assert sent is not None
+    timeout = sent.extensions.get("timeout")
+    assert timeout is not None
+    assert timeout["read"] == pytest.approx(2.0)
+
+
+@pytest.mark.asyncio
+async def test_plan_reviewer_uses_one_hundred_twenty_second_timeout(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """``/specialists/plan-reviewer`` preserves its 120s timeout after the refactor."""
+    httpx_mock.add_response(
+        method="POST",
+        url="http://127.0.0.1:8765/specialists/plan-reviewer",
+        json={"name": "plan-reviewer", "summary": "ok", "flags": []},
+    )
+    client = DaemonClient(base_url="http://127.0.0.1:8765")
+    try:
+        await client.plan_reviewer(project_slug="demo")
+    finally:
+        await client.aclose()
+
+    sent = httpx_mock.get_request()
+    assert sent is not None
+    timeout = sent.extensions.get("timeout")
+    assert timeout is not None
+    assert timeout["read"] == pytest.approx(120.0)

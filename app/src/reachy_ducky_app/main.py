@@ -49,23 +49,32 @@ class ReachyDuckyApp:
         reachy_mini: object,
         stop_event: threading.Event,
     ) -> None:
-        """Construct the piece graph and poll for wake events until stopped."""
+        """Construct the piece graph and poll for wake events until stopped.
+
+        The daemon client pools an ``httpx.AsyncClient`` across turns; we
+        wrap the wake loop in ``try/finally`` so the pool is drained on
+        any exit path — clean shutdown, cancellation, or a crash inside
+        ``run_one_turn``.
+        """
         driver = ReachyMotionDriver(reachy_mini)
         sm = EmbodimentStateMachine(driver=driver)
         voice = OpenAIRealtimeVoice()
         daemon = DaemonClient.from_env()
         wake = load_default_wake_detector()
 
-        while not stop_event.is_set():
-            # Phase A simplification: wake detection is stubbed (the default
-            # `MockWakeDetector.feed_audio` returns False unconditionally). A
-            # future task swaps in the real ONNX-backed detector and wires it
-            # to an audio pump that calls `wake.feed_audio(chunk)` on each
-            # mic buffer; `_wake_triggered` is then the bridge between that
-            # pump and the per-turn conversation loop.
-            if self._wake_triggered(wake):
-                await run_one_turn(voice=voice, sm=sm, daemon=daemon, project_slug=None)
-            await asyncio.sleep(0.05)
+        try:
+            while not stop_event.is_set():
+                # Phase A simplification: wake detection is stubbed (the default
+                # `MockWakeDetector.feed_audio` returns False unconditionally). A
+                # future task swaps in the real ONNX-backed detector and wires it
+                # to an audio pump that calls `wake.feed_audio(chunk)` on each
+                # mic buffer; `_wake_triggered` is then the bridge between that
+                # pump and the per-turn conversation loop.
+                if self._wake_triggered(wake):
+                    await run_one_turn(voice=voice, sm=sm, daemon=daemon, project_slug=None)
+                await asyncio.sleep(0.05)
+        finally:
+            await daemon.aclose()
 
     def _wake_triggered(self, wake: WakeDetector) -> bool:
         """Placeholder: returns False until the real audio pump is wired.

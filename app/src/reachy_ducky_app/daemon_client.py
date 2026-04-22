@@ -13,12 +13,19 @@ Configuration from env:
   to an empty string is an explicit "no token" (mirrors the daemon's
   :class:`~reachy_ducky_daemon.config.AppConfig` semantics).
 
-Per-endpoint timeouts:
+Per-endpoint timeouts (applied per-call, not on the pooled client):
 
 - ``/health`` — 2s (cheap, cacheable).
 - ``/brain/query`` — 60s (LLM round-trip).
 - ``/specialists/plan-reviewer`` — 120s (subagent invocation can take a
   while with tool use).
+
+Connection pooling
+------------------
+A single :class:`httpx.AsyncClient` is constructed in ``__init__`` and
+reused across all endpoint calls. This avoids a TLS handshake per call
+(measurable latency over Tailscale). Call :meth:`aclose` on shutdown to
+drain the pool cleanly.
 """
 
 from __future__ import annotations
@@ -36,7 +43,11 @@ from reachy_ducky_protocol.messages import (
 
 
 class DaemonClient:
-    """Typed async HTTP client for the daemon's three public endpoints."""
+    """Typed async HTTP client for the daemon's three public endpoints.
+
+    Holds one pooled :class:`httpx.AsyncClient` for the life of the
+    instance. Callers must :meth:`aclose` on shutdown.
+    """
 
     def __init__(
         self,
@@ -52,21 +63,32 @@ class DaemonClient:
         else:
             env_token = os.environ.get("DAEMON_AUTH_TOKEN")
             self._token = env_token or None
+        # Per-call timeouts diverge by endpoint, so the pooled client has
+        # no global timeout — each endpoint method sets its own.
+        self._http: httpx.AsyncClient = httpx.AsyncClient()
 
     @classmethod
     def from_env(cls) -> DaemonClient:
         """Build a client from ``DAEMON_URL`` / ``DAEMON_AUTH_TOKEN``."""
         return cls()
 
+    async def aclose(self) -> None:
+        """Close the pooled httpx client. Idempotent."""
+        if not self._http.is_closed:
+            await self._http.aclose()
+
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}"} if self._token else {}
 
     async def health(self) -> HealthResponse:
         """GET ``/health``. Returns the daemon's health envelope."""
-        async with httpx.AsyncClient(timeout=2.0) as http:
-            r = await http.get(f"{self._base}/health", headers=self._headers())
-            r.raise_for_status()
-            return HealthResponse.model_validate(r.json())
+        r = await self._http.get(
+            f"{self._base}/health",
+            headers=self._headers(),
+            timeout=2.0,
+        )
+        r.raise_for_status()
+        return HealthResponse.model_validate(r.json())
 
     async def brain_query(
         self,
@@ -76,14 +98,14 @@ class DaemonClient:
     ) -> BrainResponse:
         """POST ``/brain/query`` with a user utterance and get Ducky's reply."""
         req = BrainRequest(user_utterance=text, project_slug=project_slug)
-        async with httpx.AsyncClient(timeout=60.0) as http:
-            r = await http.post(
-                f"{self._base}/brain/query",
-                json=req.model_dump(),
-                headers=self._headers(),
-            )
-            r.raise_for_status()
-            return BrainResponse.model_validate(r.json())
+        r = await self._http.post(
+            f"{self._base}/brain/query",
+            json=req.model_dump(),
+            headers=self._headers(),
+            timeout=60.0,
+        )
+        r.raise_for_status()
+        return BrainResponse.model_validate(r.json())
 
     async def plan_reviewer(
         self,
@@ -93,11 +115,11 @@ class DaemonClient:
     ) -> SpecialistResponse:
         """POST ``/specialists/plan-reviewer`` and get a review envelope."""
         req = SpecialistRequest(name="plan-reviewer", project_slug=project_slug, branch=branch)
-        async with httpx.AsyncClient(timeout=120.0) as http:
-            r = await http.post(
-                f"{self._base}/specialists/plan-reviewer",
-                json=req.model_dump(),
-                headers=self._headers(),
-            )
-            r.raise_for_status()
-            return SpecialistResponse.model_validate(r.json())
+        r = await self._http.post(
+            f"{self._base}/specialists/plan-reviewer",
+            json=req.model_dump(),
+            headers=self._headers(),
+            timeout=120.0,
+        )
+        r.raise_for_status()
+        return SpecialistResponse.model_validate(r.json())
