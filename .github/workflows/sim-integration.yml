@@ -21,6 +21,11 @@ on:
   pull_request:
     branches: [main]
 
+# Restrict the GITHUB_TOKEN. Read-only is all we need — we only checkout
+# the repo and run tests; no PR comments, no deploys, no package writes.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -32,6 +37,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
+      # System dev headers for the pygobject/pycairo transitive deps that
+      # ``reachy-mini`` pulls in. ubuntu-latest ships gobject-introspection
+      # runtime but not the ``-dev`` variants, so the source build fails with
+      # ``Dependency "cairo" not found (tried pkg-config and cmake)``.
+      # Pollen's self-hosted runner has these pre-installed globally; we're
+      # on a fresh GitHub-hosted runner so the install step is explicit.
+      - name: Install system headers for pygobject/pycairo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev \
+            libgirepository1.0-dev \
+            libglib2.0-dev
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -65,18 +84,22 @@ jobs:
           echo "Daemon PID: $(cat sim_daemon.pid)"
 
       - name: Wait for the sim daemon to be running
+        # Use ``jq -e`` for JSON parsing — the earlier ``grep -o`` approach
+        # was brittle: ``"state": "running"`` (with whitespace) or any key
+        # reordering would make the regex miss. ``jq -e`` exits non-zero on
+        # a false predicate so we can use it directly as a condition.
         run: |
           for i in {1..20}; do
-            STATUS=$(curl -s http://localhost:8000/api/daemon/status \
-              | grep -o '"state":"[^"]*"' | cut -d'"' -f4)
-            echo "Attempt $i: daemon status is '$STATUS'"
-            if [ "$STATUS" = "running" ]; then
-              echo "[OK] Sim daemon is running"
+            if curl -sf http://localhost:8000/api/daemon/status \
+                 | jq -e '.state == "running"' >/dev/null 2>&1; then
+              echo "[OK] Sim daemon is running (attempt $i)"
               exit 0
             fi
+            echo "Attempt $i: daemon not running yet"
             sleep 3
           done
           echo "[ERROR] Sim daemon did not reach 'running' after 60s"
+          curl -s http://localhost:8000/api/daemon/status || echo "(no response)"
           exit 1
 
       - name: Run sim-tier tests

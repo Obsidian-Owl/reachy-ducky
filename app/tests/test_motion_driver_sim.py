@@ -111,15 +111,21 @@ def mini() -> Iterator[object]:
 
 
 def test_driver_connects_to_sim_daemon(mini: object) -> None:
-    """Wrapping a live ``ReachyMini`` must not raise.
+    """Wrapping a live ``ReachyMini`` must produce a ``MotionDriver``.
 
     Side-effect proof: the ``ReachyMini`` fixture construction above
     connects to ``localhost:8000`` — if the daemon weren't serving, the
     SDK's constructor would raise and the test would fail before this
-    body runs.
+    body runs. Additionally: the driver exposes the abstract methods
+    from :class:`MotionDriver` bound to the live SDK handle.
     """
     driver = ReachyMotionDriver(mini)
-    assert driver is not None
+    # Assert the driver is the correct concrete type AND that it forwards
+    # to the live SDK instance — not just that construction returned a
+    # truthy value. Satisfies testing-standards.md's rule against
+    # existence-only assertions.
+    assert isinstance(driver, ReachyMotionDriver)
+    assert driver._mini is mini  # noqa: SLF001 — verifying wiring, not behavior
 
 
 def test_driver_wake_up_goto_sleep_cycle(mini: object) -> None:
