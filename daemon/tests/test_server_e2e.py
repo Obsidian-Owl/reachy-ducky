@@ -26,19 +26,23 @@ from reachy_ducky_daemon.project import Project
 from reachy_ducky_daemon.server import create_app
 
 
+def _run_git(repo: Path, args: list[str]) -> None:
+    """Run a git subcommand in ``repo`` with `check=True` and output captured."""
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
 def _init_repo(root: Path) -> Path:
     """Minimal git repo with one plan + one uncommitted change."""
     root.mkdir(parents=True, exist_ok=True)
-    run = lambda args: subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)  # noqa: E731
-    run(["init", "-b", "main"])
-    run(["config", "user.email", "t@t"])
-    run(["config", "user.name", "t"])
-    run(["config", "commit.gpgsign", "false"])
+    _run_git(root, ["init", "-b", "main"])
+    _run_git(root, ["config", "user.email", "t@t"])
+    _run_git(root, ["config", "user.name", "t"])
+    _run_git(root, ["config", "commit.gpgsign", "false"])
     (root / "docs" / "plans").mkdir(parents=True)
     (root / "docs" / "plans" / "p.md").write_text("# Plan Foo\nAdd feature X\n")
     (root / "a.py").write_text("x = 1\n")
-    run(["add", "."])
-    run(["commit", "-m", "init"])
+    _run_git(root, ["add", "."])
+    _run_git(root, ["commit", "-m", "init"])
     # Modify a TRACKED file so `git diff` (working-tree vs HEAD) surfaces
     # the change. Adding an untracked file wouldn't — git diff omits
     # untracked additions without --no-index/--untracked.
@@ -161,11 +165,8 @@ def test_e2e_multi_project_routes_to_correct_brain_and_repo(tmp_path: Path) -> N
     beta_repo = _init_repo(tmp_path / "beta")
     # Make beta's plan different so we can prove the right repo was read.
     (beta_repo / "docs" / "plans" / "p.md").write_text("# Plan Beta\nBeta's feature\n")
-    run_beta = lambda args: subprocess.run(  # noqa: E731
-        ["git", *args], cwd=beta_repo, check=True, capture_output=True
-    )
-    run_beta(["add", "."])
-    run_beta(["commit", "--amend", "-m", "init-beta"])
+    _run_git(beta_repo, ["add", "."])
+    _run_git(beta_repo, ["commit", "--amend", "-m", "init-beta"])
 
     alpha_brain = MockBrain()
     beta_brain = MockBrain()

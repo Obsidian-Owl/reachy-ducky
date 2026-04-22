@@ -30,6 +30,14 @@ markers = [
     "integration: requires live external APIs",
 ]
 
+# Mypy per-module overrides. Keep this list short — one-liners for deps
+# that ship no stubs. Prefer real typing when available.
+#   rumps: macOS-only menu-bar lib, no stubs / py.typed. Used only from
+#          menubar.main via a lazy import behind `sys.platform == "darwin"`.
+[[tool.mypy.overrides]]
+module = "rumps"
+ignore_missing_imports = true
+
 # Pyright config lives in ./pyrightconfig.json (takes precedence over
 # [tool.pyright] here; pyrightconfig.json is more reliably live-reloaded
 # by IDE language servers).
