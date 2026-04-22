@@ -75,10 +75,11 @@ branch = true
 relative_files = true
 
 [tool.coverage.report]
-# Threshold locks the current baseline (91% at the time this landed)
-# with a small buffer for measurement variance and import-time
-# branching we can't stably exercise. Bump when we're consistently
-# >93% so regressions are caught before they widen.
+# Threshold locks the current baseline (90.61% combined statements +
+# branches at the time this landed; the table's rounded per-row 91%
+# is a different aggregate). 0.61pp buffer absorbs measurement
+# variance from new tests and import-time branching we can't stably
+# exercise. Bump when we're consistently >93%.
 fail_under = 90
 show_missing = true
 skip_covered = false
