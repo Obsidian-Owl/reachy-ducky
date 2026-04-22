@@ -37,7 +37,7 @@ read-only git subcommands (``diff``, ``rev-parse``) are executed.
 
 from __future__ import annotations
 
-import subprocess
+import subprocess  # nosec B404 — used only for controlled list-form read-only git calls (not user-shell input)
 from pathlib import Path
 
 from reachy_ducky_protocol.messages import BrainRequest, SpecialistResponse
@@ -76,7 +76,7 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     an uncaught exception. List-form args (never ``shell=True``) per
     ``.claude/rules/python-standards.md``.
     """
-    return subprocess.run(  # noqa: S603 - list-form args, read-only git only
+    return subprocess.run(  # noqa: S603  # nosec B603 B607 — list form, read-only git only; "git" resolved via PATH is the intended portable behaviour
         ["git", *args],
         cwd=cwd,
         check=False,

@@ -27,14 +27,13 @@ RUNNING_JOKES_MD = "# Running jokes\n\n(seed empty)\n"
 OPEN_THREADS_MD = "# Open threads\n\n(seed empty — threads Dan and Ducky are tracking)\n"
 
 USER_MD = (
-    "# Human\n\n"
-    "(Ducky will populate as it learns about Dan. See global memory for stable facts.)\n"
+    "# Human\n\n(Ducky will populate as it learns about Dan. See global memory for stable facts.)\n"
 )
 FEEDBACK_MD = (
-    "# Feedback history\n\n" "(Ducky records validated approaches and explicit corrections here.)\n"
+    "# Feedback history\n\n(Ducky records validated approaches and explicit corrections here.)\n"
 )
 PREFERENCES_MD = (
-    "# Preferences\n\n" "(Dan's stated preferences; Ducky confirms changes before overwriting.)\n"
+    "# Preferences\n\n(Dan's stated preferences; Ducky confirms changes before overwriting.)\n"
 )
 
 PROJECT_MD = "# Project: {slug}\n\n(Seeded on first watch.)\n"

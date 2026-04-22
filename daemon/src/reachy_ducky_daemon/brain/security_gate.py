@@ -278,8 +278,7 @@ async def security_gate(
             suspicious, needle = _glob_pattern_is_suspicious(pattern_val)
             if suspicious:
                 return _deny(
-                    f"Glob pattern {pattern_val!r} contains secret-suggesting "
-                    f"substring {needle!r}"
+                    f"Glob pattern {pattern_val!r} contains secret-suggesting substring {needle!r}"
                 )
 
     if tool_name in _GUARDED_PATH_TOOLS:

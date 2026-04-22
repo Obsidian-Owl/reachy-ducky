@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
+import subprocess  # nosec B404 — used only to invoke the `claude` CLI for an auth-status check; list-form, no shell, no user-controlled args
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -102,7 +102,7 @@ def _check_claude_auth() -> None:
     query, so this is purely a UX nicety.
     """
     try:
-        proc = subprocess.run(  # noqa: S603 — list form, no shell
+        proc = subprocess.run(  # noqa: S603  # nosec B603 B607 — list form, no shell; "claude" resolved via PATH is the intended portable behaviour
             ["claude", "auth", "status"],
             capture_output=True,
             text=True,
