@@ -254,3 +254,116 @@ async def test_run_one_turn_exits_voice_turn_context_on_exception(
     # Even though the turn raised, the CM must have exited cleanly.
     assert voice.enter_count == 1
     assert voice.exit_count == 1
+
+
+class _RaisingGetUserTextTurn(MockVoiceTurn):
+    """Turn whose ``get_user_text`` always raises."""
+
+    def __init__(self) -> None:
+        super().__init__(user_text="")
+
+    async def get_user_text(self) -> str:
+        raise RuntimeError("transcription exploded")
+
+
+class _RaisingGetUserTextVoice(MockVoice):
+    """Voice whose turn raises from ``get_user_text`` (LISTENING-state raise)."""
+
+    def start_turn(self) -> AbstractAsyncContextManager[MockVoiceTurn]:
+        @asynccontextmanager
+        async def _cm() -> AsyncIterator[MockVoiceTurn]:
+            yield _RaisingGetUserTextTurn()
+
+        return _cm()
+
+
+class _RaisingSpeakTextTurn(MockVoiceTurn):
+    """Turn whose ``speak_text`` raises (so ``get_user_text`` still succeeds)."""
+
+    def __init__(self, user_text: str) -> None:
+        super().__init__(user_text=user_text)
+
+    async def speak_text(self, text: str) -> None:
+        raise RuntimeError("tts exploded")
+
+
+class _RaisingSpeakTextVoice(MockVoice):
+    """Voice whose turn raises from ``speak_text`` (LISTENING-again-state raise)."""
+
+    def start_turn(self) -> AbstractAsyncContextManager[MockVoiceTurn]:
+        user_text = self._user_text
+
+        @asynccontextmanager
+        async def _cm() -> AsyncIterator[MockVoiceTurn]:
+            yield _RaisingSpeakTextTurn(user_text)
+
+        return _cm()
+
+
+@pytest.mark.asyncio
+async def test_run_one_turn_resets_to_idle_when_get_user_text_raises(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """If ``get_user_text`` raises in LISTENING: state lands back at IDLE.
+
+    Guards against the robot's LISTENING posture persisting forever after
+    a transcription failure.
+    """
+    # No httpx_mock.add_response — the turn must raise before the brain call.
+    voice = _RaisingGetUserTextVoice(scripted_user_text="unused")
+    driver = MockMotionDriver()
+    sm = EmbodimentStateMachine(driver=driver)
+    daemon = DaemonClient(base_url="http://127.0.0.1:8765")
+
+    with pytest.raises(RuntimeError, match="transcription exploded"):
+        await run_one_turn(voice=voice, sm=sm, daemon=daemon)
+
+    assert sm.state == State.IDLE
+    assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_run_one_turn_resets_to_idle_when_brain_query_raises(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """If ``brain_query`` raises in THINKING: state lands back at IDLE.
+
+    Previously the state machine would stay stuck at THINKING after any
+    daemon failure.
+    """
+    httpx_mock.add_response(
+        method="POST",
+        url="http://127.0.0.1:8765/brain/query",
+        status_code=500,
+        json={"detail": "brain down"},
+    )
+    voice = MockVoice(scripted_user_text="hi")
+    driver = MockMotionDriver()
+    sm = EmbodimentStateMachine(driver=driver)
+    daemon = DaemonClient(base_url="http://127.0.0.1:8765")
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await run_one_turn(voice=voice, sm=sm, daemon=daemon)
+
+    assert sm.state == State.IDLE
+
+
+@pytest.mark.asyncio
+async def test_run_one_turn_resets_to_idle_when_speak_text_raises(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """If ``speak_text`` raises in LISTENING (reply): state lands back at IDLE."""
+    httpx_mock.add_response(
+        method="POST",
+        url="http://127.0.0.1:8765/brain/query",
+        json={"text": "ok", "specialist_invoked": None},
+    )
+    voice = _RaisingSpeakTextVoice(scripted_user_text="hi")
+    driver = MockMotionDriver()
+    sm = EmbodimentStateMachine(driver=driver)
+    daemon = DaemonClient(base_url="http://127.0.0.1:8765")
+
+    with pytest.raises(RuntimeError, match="tts exploded"):
+        await run_one_turn(voice=voice, sm=sm, daemon=daemon)
+
+    assert sm.state == State.IDLE
