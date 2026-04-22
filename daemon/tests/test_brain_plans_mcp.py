@@ -9,6 +9,7 @@ through ``create_sdk_mcp_server`` with the right names/descriptions.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from reachy_ducky_daemon.brain.plans_mcp import (
@@ -18,6 +19,22 @@ from reachy_ducky_daemon.brain.plans_mcp import (
     _read_plan,
     plans_mcp_server,
 )
+
+
+def _require_dict_schema(schema: Any, *, tool_name: str) -> dict[str, Any]:
+    """Narrow a tool's ``input_schema`` to the dict case or fail fast.
+
+    The SDK types ``input_schema`` as ``type | dict[str, Any]``. Our plans
+    tools construct with dicts, but relying on ``assert isinstance`` to
+    narrow is brittle under ``python -O`` and leaks a confusing ``TypeError``
+    on ``"x" in schema`` if the SDK ever returns the class variant. Use
+    ``pytest.fail`` so the failure mode is a clear, optimization-independent
+    test failure.
+    """
+    if not isinstance(schema, dict):
+        pytest.fail(f"{tool_name} input_schema is {type(schema).__name__}, expected dict")
+    return schema
+
 
 # ---------------------------------------------------------------------------
 # _list_plans
@@ -507,18 +524,18 @@ async def test_read_plan_handler_returns_error_on_null_byte_in_path(
 def test_find_plans_tool_signature_has_no_project_root(tmp_path: Path) -> None:
     """find_plans tool input schema exposes no project_root — LLM cannot forge scope."""
     find_plans, _read_plan_tool = _make_plans_tools(tmp_path)
-    # input_schema is typed `type | dict[str, Any]` by the SDK; `in` only
-    # works on the dict case, so narrow before testing membership.
-    schema = find_plans.input_schema
-    assert isinstance(schema, dict)
+    # ``input_schema`` is typed ``type | dict[str, Any]`` by the SDK; ``in``
+    # only works on the dict case. Explicit fail (not ``assert isinstance``)
+    # so this works under ``python -O`` and gives a clear message if the SDK
+    # ever returns a Pydantic class instead of a dict.
+    schema = _require_dict_schema(find_plans.input_schema, tool_name="find_plans")
     assert "project_root" not in schema
 
 
 def test_read_plan_tool_signature_has_no_project_root(tmp_path: Path) -> None:
     """read_plan exposes only rel_path — LLM cannot forge scope."""
     _find_plans, read_plan_tool = _make_plans_tools(tmp_path)
-    schema = read_plan_tool.input_schema
-    assert isinstance(schema, dict)
+    schema = _require_dict_schema(read_plan_tool.input_schema, tool_name="read_plan")
     assert "project_root" not in schema
     assert "rel_path" in schema
 
