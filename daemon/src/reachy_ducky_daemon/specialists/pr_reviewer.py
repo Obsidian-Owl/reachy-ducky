@@ -24,6 +24,7 @@ from pathlib import Path
 __all__ = [
     "_GH_TIMEOUT_SECONDS",
     "_PR_VIEW_FIELDS",
+    "_fetch_diff",
     "_fetch_pr_metadata",
     "_run_gh",
 ]
@@ -99,3 +100,20 @@ def _fetch_pr_metadata(
     if not isinstance(parsed, dict):
         return {}, f"gh pr view {pr_number} returned non-object JSON"
     return parsed, None
+
+
+def _fetch_diff(pr_number: int, cwd: Path) -> tuple[str, str | None]:
+    """Return ``(diff_text, error_or_None)`` from ``gh pr diff <num>``.
+
+    The GitHub API's diff endpoint would need manual pagination + merge
+    for very large PRs; ``gh pr diff`` handles that for us. Output is
+    the raw unified-diff text ready to drop into the assembled prompt.
+    """
+    try:
+        proc = _run_gh(["pr", "diff", str(pr_number)], cwd=cwd)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "", f"gh pr diff {pr_number} failed: {exc}"
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip() or "non-zero exit"
+        return "", f"gh pr diff {pr_number} failed: {stderr}"
+    return proc.stdout, None

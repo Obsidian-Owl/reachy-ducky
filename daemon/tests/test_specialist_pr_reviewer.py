@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from reachy_ducky_daemon.specialists.pr_reviewer import (
     _GH_TIMEOUT_SECONDS,
+    _fetch_diff,
     _fetch_pr_metadata,
     _run_gh,
 )
@@ -106,3 +107,34 @@ def test_fetch_pr_metadata_surfaces_unparseable_json_as_diagnostic(tmp_path: Pat
     assert meta == {}
     assert err is not None
     assert "unparseable" in err.lower() or "json" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Diff fetch
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_diff_invokes_gh_pr_diff(tmp_path: Path) -> None:
+    """_fetch_diff runs ``gh pr diff <num>`` and returns ``(stdout, None)`` on success."""
+    fake_proc = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout="diff --git a/src/x.py b/src/x.py\n+x = 2\n",
+        stderr="",
+    )
+    with patch("subprocess.run", return_value=fake_proc) as m:
+        diff, err = _fetch_diff(pr_number=42, cwd=tmp_path)
+
+    assert err is None
+    assert "+x = 2" in diff
+    assert m.call_args.args[0] == ["gh", "pr", "diff", "42"]
+
+
+def test_fetch_diff_surfaces_failure_as_diagnostic(tmp_path: Path) -> None:
+    """Non-zero ``gh`` exit returns ``("", error_string)`` — no exception."""
+    fake_proc = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="no such PR")
+    with patch("subprocess.run", return_value=fake_proc):
+        diff, err = _fetch_diff(pr_number=42, cwd=tmp_path)
+
+    assert diff == ""
+    assert err is not None and "no such PR" in err
