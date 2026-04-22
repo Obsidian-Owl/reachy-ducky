@@ -32,8 +32,10 @@ pre-push:
 
     mypy-full:
       # Whole-project strict pass; cheap for a small repo, catches cross-file
-      # errors that per-file staged runs miss.
-      run: uv run mypy --strict daemon/src app/src menubar/src protocol/src
+      # errors that per-file staged runs miss. Includes tests so local
+      # pre-push parity matches ``ci.yml``'s two mypy steps (src + tests) —
+      # prevents "local passes, CI fails" surprise on test-only changes.
+      run: uv run mypy --strict daemon/src app/src menubar/src protocol/src daemon/tests protocol/tests menubar/tests app/tests
 
     gitleaks-history:
       # Scans history on push to catch anything that slipped past pre-commit.
