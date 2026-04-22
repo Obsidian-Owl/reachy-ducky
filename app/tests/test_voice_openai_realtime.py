@@ -1,22 +1,78 @@
 """Tests for :class:`OpenAIRealtimeVoice`.
 
-Unit tests cover construction-shape only. The stateful WebSocket methods
-(``get_user_text``, ``speak_text``, ``interrupt``) require a live OpenAI
-session and are exercised by the ``@pytest.mark.integration`` smoke at
-the bottom of this file, which is gated by ``REACHY_DUCKY_RUN_INTEGRATION``
-+ ``OPENAI_API_KEY``.
+Construction-shape tests and fake-connection drain tests live here. The
+drain tests feed scripted ``AsyncRealtimeConnection`` event streams into
+:meth:`OpenAIRealtimeVoiceTurn.speak_text` to prove it consumes events
+until the terminal ``response.done`` arrives without needing a real
+WebSocket. The ``@pytest.mark.integration`` smoke at the bottom covers
+the live-session path.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
+from collections.abc import AsyncIterator
+from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from openai.types.realtime import RealtimeErrorEvent, ResponseDoneEvent
+from openai.types.realtime.realtime_error import RealtimeError
+from openai.types.realtime.realtime_response import RealtimeResponse
 from reachy_ducky_app.voice.openai_realtime import (
     OpenAIRealtimeVoice,
     OpenAIRealtimeVoiceTurn,
 )
+
+
+class _FakeConnection:
+    """Scripted stand-in for ``openai`` ``AsyncRealtimeConnection``.
+
+    Drives ``speak_text`` through a deterministic event sequence. The
+    iterator records which events were consumed (``observed``) so tests
+    can assert the drain went all the way to the terminal event and no
+    further. ``response.create`` / ``response.cancel`` are ``AsyncMock``s
+    so tests can assert the outbound side-effects.
+    """
+
+    def __init__(self, events: list[Any]) -> None:
+        self._events = list(events)
+        self.observed: list[Any] = []
+        self.response = MagicMock()
+        self.response.create = AsyncMock()
+        self.response.cancel = AsyncMock()
+
+    def __aiter__(self) -> AsyncIterator[Any]:
+        return self._drain()
+
+    async def _drain(self) -> AsyncIterator[Any]:
+        for event in self._events:
+            self.observed.append(event)
+            yield event
+
+
+def _make_response_done(
+    status: Literal["completed", "cancelled", "failed", "incomplete", "in_progress"] = (
+        "completed"
+    ),
+) -> ResponseDoneEvent:
+    """Build a minimal ``ResponseDoneEvent`` with the given response status."""
+    return ResponseDoneEvent(
+        event_id="ev_done",
+        response=RealtimeResponse(id="resp_1", status=status),
+        type="response.done",
+    )
+
+
+def _make_error_event(message: str = "boom") -> RealtimeErrorEvent:
+    """Build a minimal session-level ``RealtimeErrorEvent``."""
+    return RealtimeErrorEvent(
+        event_id="ev_err",
+        error=RealtimeError(type="server_error", message=message),
+        type="error",
+    )
 
 
 def test_construction_reads_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,6 +219,107 @@ async def test_start_turn_exits_sdk_connect_manager_on_exception(
 
     connect_manager.__aenter__.assert_awaited_once()
     connect_manager.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_speak_text_drains_events_until_response_done() -> None:
+    """Happy path: ``speak_text`` returns only after ``ResponseDoneEvent``.
+
+    Regression for the post-I1 bug where ``speak_text`` returned as soon
+    as ``response.create`` was awaited, so the outer async-with closed
+    the websocket before the server finished streaming audio. The drain
+    loop must consume all intermediate events and stop on ``response.done``.
+    """
+    interstitial = MagicMock(name="response.audio.delta")
+    done = _make_response_done("completed")
+    connection = _FakeConnection(events=[interstitial, done])
+
+    turn = OpenAIRealtimeVoiceTurn(connection)  # type: ignore[arg-type]
+
+    await turn.speak_text("hi")
+
+    connection.response.create.assert_awaited_once()
+    payload = connection.response.create.await_args.kwargs["response"]
+    assert payload == {
+        "output_modalities": ["audio", "text"],
+        "instructions": "hi",
+    }
+    # Drain consumed both events and stopped at the terminal one.
+    assert connection.observed == [interstitial, done]
+
+
+@pytest.mark.asyncio
+async def test_speak_text_returns_on_failed_response_and_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Server-side response failure: ``speak_text`` logs and returns.
+
+    Best-effort TTS semantics — the state machine progresses even if the
+    Realtime API reports a failed response. We still want a breadcrumb
+    in the log so a debug session can see why audio went quiet.
+    """
+    failed = _make_response_done("failed")
+    connection = _FakeConnection(events=[failed])
+
+    turn = OpenAIRealtimeVoiceTurn(connection)  # type: ignore[arg-type]
+
+    with caplog.at_level(logging.WARNING, logger="reachy_ducky_app.voice.openai_realtime"):
+        await turn.speak_text("hi")
+
+    connection.response.create.assert_awaited_once()
+    assert connection.observed == [failed]
+    assert any(
+        "realtime response" in record.message.lower() and record.levelno == logging.WARNING
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_speak_text_returns_on_session_error_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Session-level ``error`` event: log and return (no hang, no raise)."""
+    err = _make_error_event("connection lost")
+    connection = _FakeConnection(events=[err])
+
+    turn = OpenAIRealtimeVoiceTurn(connection)  # type: ignore[arg-type]
+
+    with caplog.at_level(logging.WARNING, logger="reachy_ducky_app.voice.openai_realtime"):
+        await turn.speak_text("hi")
+
+    connection.response.create.assert_awaited_once()
+    assert connection.observed == [err]
+
+
+@pytest.mark.asyncio
+async def test_speak_text_returns_on_cancelled_response() -> None:
+    """Concurrent ``interrupt()`` triggers a cancel; the server emits
+    ``response.done`` with ``status == "cancelled"``; ``speak_text`` returns.
+
+    This is how barge-in works end-to-end: the drain loop observes the
+    terminal event the server sent in response to our cancel, rather
+    than consulting ``self._interrupted`` directly.
+    """
+    cancelled = _make_response_done("cancelled")
+    connection = _FakeConnection(events=[cancelled])
+
+    turn = OpenAIRealtimeVoiceTurn(connection)  # type: ignore[arg-type]
+
+    async def _drive_speak() -> None:
+        await turn.speak_text("hi")
+
+    async def _drive_interrupt() -> None:
+        # Yield once so speak_text gets a chance to await response.create
+        # before we fire the cancel — mirrors realistic ordering.
+        await asyncio.sleep(0)
+        await turn.interrupt()
+
+    await asyncio.gather(_drive_speak(), _drive_interrupt())
+
+    connection.response.create.assert_awaited_once()
+    connection.response.cancel.assert_awaited_once()
+    assert turn._interrupted is True
+    assert connection.observed == [cancelled]
 
 
 @pytest.mark.integration

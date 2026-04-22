@@ -40,7 +40,11 @@ so this module adapts:
 4. **Response create/cancel.** ``conn.response.create(response=params)`` —
    param field is ``output_modalities`` (not ``modalities`` as in the plan
    sketch). ``conn.response.cancel()`` — no arguments needed for the
-   common barge-in case.
+   common barge-in case. The terminal server event for *any* response
+   (completed / cancelled / failed / incomplete) is a single
+   ``ResponseDoneEvent``; its ``response.status`` field disambiguates
+   the four cases. Session-level problems arrive as ``RealtimeErrorEvent``
+   with ``type == "error"``, decoupled from any specific response.
 
 ``fastrtc`` is not wired. The ``openai`` SDK handles the WebSocket transport
 directly; ``fastrtc`` is only needed for browser-style full-duplex WebRTC,
@@ -68,11 +72,13 @@ returned a bare ``VoiceTurn`` and leaked the websocket on every turn.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from openai.types.realtime import RealtimeErrorEvent, ResponseDoneEvent
 from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
     ConversationItemInputAudioTranscriptionCompletedEvent,
 )
@@ -81,6 +87,8 @@ from .interface import VoiceInterface, VoiceTurn
 
 if TYPE_CHECKING:
     from openai.resources.realtime.realtime import AsyncRealtimeConnection
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIRealtimeVoiceTurn(VoiceTurn):
@@ -125,6 +133,17 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
         Uses ``response.create`` with ``instructions=text`` and both audio +
         text output modalities. The SDK streams audio chunks over the
         WebSocket; the transport layer (robot's speaker) handles playback.
+
+        Drains the connection's event iterator until the terminal
+        ``response.done`` (completed / cancelled / failed / incomplete)
+        arrives. Returning earlier would let the enclosing ``start_turn``
+        context manager close the websocket mid-stream, truncating audio.
+
+        Best-effort semantics: a failed response or a session-level error
+        event is logged at WARNING and returns cleanly, so the caller's
+        state machine still progresses. ``interrupt()`` funnels through
+        the same drain — the server emits ``response.done`` with
+        ``status == "cancelled"``, which this loop observes and exits on.
         """
         await self._connection.response.create(
             response={
@@ -132,6 +151,24 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
                 "instructions": text,
             },
         )
+        async for event in self._connection:
+            if isinstance(event, ResponseDoneEvent):
+                status = event.response.status
+                if status in ("failed", "incomplete"):
+                    logger.warning(
+                        "realtime response ended without completing",
+                        extra={"status": status, "response_id": event.response.id},
+                    )
+                return
+            if isinstance(event, RealtimeErrorEvent):
+                logger.warning(
+                    "realtime session error during speak_text",
+                    extra={
+                        "error_type": event.error.type,
+                        "error_code": event.error.code,
+                    },
+                )
+                return
 
     async def interrupt(self) -> None:
         """Cancel the in-flight assistant response for barge-in."""
