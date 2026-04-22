@@ -1,6 +1,6 @@
 # Phase A End-to-End Smoke Procedure
 
-Last verified against `m8-voice` @ `2a753fe`. Adapt when tasks after M11.2 land.
+> This procedure mirrors the tree on `m8-voice` as of 2026-04-22. Re-verify after every merge.
 
 This procedure walks a teammate through bringing up the three Phase A
 surfaces (Mac daemon, Mac menu-bar, Reachy Mini app) and exercising the
@@ -15,8 +15,8 @@ code-level override.
 
 - `claude login` — run on the Mac. `ClaudeSDKBrain` uses the locally
   installed Claude CLI's OAuth credentials via `claude_agent_sdk`.
-  (`CLAUDE_CODE_OAUTH_TOKEN` is a CI-only path used by
-  `.github/workflows/integration.yml`; local runs do NOT need it.)
+  (`CLAUDE_CODE_OAUTH_TOKEN` is a CI-only path used by the GitHub
+  workflows under `.github/workflows/`; local runs do NOT need it.)
 - `gh auth login` — only if you plan to manually inspect GitHub via
   `gh`. The daemon itself reaches GitHub via `github-mcp-server`, not
   `gh`.
@@ -138,9 +138,7 @@ Verification (reading `menubar/src/reachy_ducky_menubar/main.py` +
   (<code>)` for a reachable-but-broken daemon). Restart the daemon
   and the glyph returns to `🦆`.
 
-The menu-bar poller only drives IDLE ↔ MUTED locally; `LISTENING`
-and `THINKING` glyphs exist in `state_icon.py` but nothing pushes
-those states over the wire in Phase A. See "Known gaps".
+See "Known gaps" §2.
 
 ## 3. Start the Reachy app on the robot
 
@@ -217,6 +215,9 @@ Workarounds for smoke-verifying the daemon + voice path without wake:
 poll loop (`main.py::_poll_loop`) only writes the local IDLE /
 MUTED state. There is no `/state` push from the robot or daemon.
 
+- TODO (follow-up issue): Menu-bar `DAEMON_URL` should become
+  env-overridable; currently hardcoded.
+
 ### 3. Reachy dashboard install is unverified
 
 `app/reachy_mini_app.yaml` declares `app_class:
@@ -241,7 +242,7 @@ not the plan's draft. A follow-up issue should update the plan.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Menu-bar shows `🦆⚠` "daemon unreachable" | Daemon not running, or bound to a different host/port than `http://127.0.0.1:8765` | Start the daemon; or set `_DAEMON_URL_DEFAULT` (currently hardcoded — see menubar/src/reachy_ducky_menubar/main.py). |
+| Menu-bar shows `🦆⚠` "daemon unreachable" | Daemon not running, or bound to a different host/port than `http://127.0.0.1:8765` | Start the daemon; or edit `menubar/src/reachy_ducky_menubar/main.py:24` — `DAEMON_URL` is not yet env-overridable in Phase A. |
 | `curl /brain/query` returns `401 {"detail":"missing bearer token"}` | `REACHY_DUCKY_AUTH_TOKEN` is set on the daemon; your curl didn't send `Authorization: Bearer <token>` | Add the header, or unset the env var and restart the daemon. |
 | `curl /brain/query` returns `401 {"detail":"invalid bearer token"}` | Token mismatch between daemon and caller | Re-source `~/.reachy-ducky/.env` in both shells. |
 | `curl /brain/query` returns `400 {"detail":"no project_slug in request and no primary project configured"}` | Wizard was not run, or no `primary = true` project in `config.toml` | Re-run `uv run reachy-ducky init`, or edit `~/.reachy-ducky/config.toml`. |
@@ -252,3 +253,23 @@ not the plan's draft. A follow-up issue should update the plan.
 | `uv run reachy-ducky-menubar` crashes with `ModuleNotFoundError: rumps` | `macos` extra not installed | `uv sync --all-packages --extra macos`. |
 | `OpenAIRealtimeVoice` raises `ValueError: OPENAI_API_KEY not set` on the robot | Env var missing in the robot-side process | Export `OPENAI_API_KEY` before starting the app. |
 | Realtime session opens but hangs up immediately after user speech | Schema drift between the `openai` SDK version and `voice/openai_realtime.py`'s assumed event names | Confirm `openai==1.109.x`; see module docstring for the verified event shape. |
+
+## Tailing logs
+
+The daemon logs to stdout. For long smoke sessions, start it under
+`2>&1 | tee /tmp/reachy-ducky-daemon.log` (or similar) so failure
+modes can be cross-referenced with the log after the fact.
+
+## Clean shutdown
+
+Ctrl-C the daemon in its terminal; quit the menu-bar app from its
+own menu; stop the Reachy app from the dashboard (or SSH the robot
+and terminate the python process).
+
+## Done checklist
+
+- [ ] `/health` returns `ok: true` and the expected brain state
+- [ ] Menu-bar icon shows `🦆` (unmuted) and toggles to `🦆🔇` / back
+- [ ] Protected-route curl with bearer token succeeds
+- [ ] Daemon process exits cleanly on Ctrl-C
+- [ ] (Deferred until Known gaps close) Robot app instantiates from the Reachy dashboard and plays `listening` → `thinking` moves end-to-end
