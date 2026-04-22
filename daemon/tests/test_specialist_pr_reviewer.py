@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from reachy_ducky_daemon.specialists.pr_reviewer import (
     _GH_TIMEOUT_SECONDS,
+    _fetch_check_runs,
     _fetch_diff,
     _fetch_pr_metadata,
     _fetch_review_comments,
@@ -193,3 +194,53 @@ def test_fetch_review_comments_surfaces_non_list_json_as_diagnostic(
     assert comments == []
     assert err is not None
     assert "non-list" in err.lower() or "unexpected" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# CI check-runs fetch
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_check_runs_calls_gh_api_at_head_sha(tmp_path: Path) -> None:
+    """_fetch_check_runs hits /repos/{owner}/{repo}/commits/{sha}/check-runs."""
+    fixture = _FIXTURES / "gh_api_check_runs.json"
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=fixture.read_text(), stderr=""
+    )
+    with patch("subprocess.run", return_value=fake_proc) as m:
+        runs, err = _fetch_check_runs(
+            owner="Obsidian-Owl", repo="reachy-ducky", head_sha="abc123", cwd=tmp_path
+        )
+
+    assert err is None
+    assert len(runs) == 3
+    assert runs[0]["name"] == "ruff"
+    argv = m.call_args.args[0]
+    assert argv[:2] == ["gh", "api"]
+    assert "/repos/Obsidian-Owl/reachy-ducky/commits/abc123/check-runs" in argv
+
+
+def test_fetch_check_runs_unwraps_github_envelope(tmp_path: Path) -> None:
+    """GitHub wraps check-runs in ``{total_count, check_runs: [...]}`` — unwrap."""
+    envelope = '{"total_count": 1, "check_runs": [{"name": "mypy", "conclusion": "success"}]}'
+    fake_proc = subprocess.CompletedProcess(args=[], returncode=0, stdout=envelope, stderr="")
+    with patch("subprocess.run", return_value=fake_proc):
+        runs, err = _fetch_check_runs(owner="o", repo="r", head_sha="sha", cwd=tmp_path)
+
+    assert err is None
+    assert runs == [{"name": "mypy", "conclusion": "success"}]
+
+
+def test_fetch_check_runs_surfaces_unexpected_shape_as_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """Missing ``check_runs`` key (unexpected shape) becomes a diagnostic."""
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout='{"total_count": 0}', stderr=""
+    )
+    with patch("subprocess.run", return_value=fake_proc):
+        runs, err = _fetch_check_runs(owner="o", repo="r", head_sha="sha", cwd=tmp_path)
+
+    assert runs == []
+    assert err is not None
+    assert "unexpected" in err.lower() or "shape" in err.lower()

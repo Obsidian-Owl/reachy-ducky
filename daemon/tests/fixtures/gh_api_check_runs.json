@@ -1,0 +1,8 @@
+{
+  "total_count": 3,
+  "check_runs": [
+    {"name": "ruff", "status": "completed", "conclusion": "success"},
+    {"name": "mypy", "status": "completed", "conclusion": "failure"},
+    {"name": "pytest", "status": "in_progress", "conclusion": null}
+  ]
+}

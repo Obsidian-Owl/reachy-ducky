@@ -24,6 +24,7 @@ from pathlib import Path
 __all__ = [
     "_GH_TIMEOUT_SECONDS",
     "_PR_VIEW_FIELDS",
+    "_fetch_check_runs",
     "_fetch_diff",
     "_fetch_pr_metadata",
     "_fetch_review_comments",
@@ -152,3 +153,36 @@ def _fetch_review_comments(
         return [], f"gh api {endpoint} returned non-list JSON (unexpected shape)"
     # Narrow the element type — every list entry should be a JSON object.
     return [c for c in parsed if isinstance(c, dict)], None
+
+
+def _fetch_check_runs(
+    owner: str,
+    repo: str,
+    head_sha: str,
+    cwd: Path,
+) -> tuple[list[dict[str, object]], str | None]:
+    """Return ``(check_runs_list, error_or_None)`` for the PR's head commit.
+
+    GitHub wraps check-runs in ``{total_count, check_runs: [...]}``;
+    unwrap to the list for caller convenience. Status + conclusion per
+    run drive the objective ``ci-green`` / ``ci-red`` / ``ci-pending``
+    flags the orchestrator emits.
+    """
+    endpoint = f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs"
+    try:
+        proc = _run_gh(["api", endpoint], cwd=cwd)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [], f"gh api {endpoint} failed: {exc}"
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip() or "non-zero exit"
+        return [], f"gh api {endpoint} failed: {stderr}"
+    try:
+        parsed = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return [], f"gh api {endpoint} emitted unparseable JSON: {exc}"
+    if not isinstance(parsed, dict) or "check_runs" not in parsed:
+        return [], f"gh api {endpoint} returned unexpected shape"
+    runs = parsed["check_runs"]
+    if not isinstance(runs, list):
+        return [], f"gh api {endpoint} returned check_runs of unexpected type"
+    return [r for r in runs if isinstance(r, dict)], None
