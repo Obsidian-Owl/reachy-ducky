@@ -41,6 +41,35 @@ def test_specialist_request_plan_reviewer() -> None:
     assert req.name == "plan-reviewer"
 
 
+def test_specialist_request_pr_number_defaults_to_none() -> None:
+    """pr_number is optional on SpecialistRequest — omission leaves it None."""
+    req = SpecialistRequest(name="pr-reviewer", project_slug="reachy-ducky")
+    assert req.pr_number is None
+
+
+def test_specialist_request_accepts_pr_number() -> None:
+    """pr_number is a plain int when supplied."""
+    req = SpecialistRequest(name="pr-reviewer", project_slug="reachy-ducky", pr_number=42)
+    assert req.pr_number == 42
+
+
+def test_specialist_request_rejects_non_int_pr_number() -> None:
+    """pr_number must be int-coercible — non-numeric strings fail validation.
+
+    Pydantic v2 lax-mode coerces ``"42"`` to ``42``, which is consistent with
+    the rest of the protocol. This test pins the int-valued-ness of the field
+    against an input Pydantic cannot coerce.
+    """
+    with pytest.raises(ValidationError):
+        SpecialistRequest.model_validate(
+            {
+                "name": "pr-reviewer",
+                "project_slug": "reachy-ducky",
+                "pr_number": "not-a-number",
+            }
+        )
+
+
 def test_state_enum_values() -> None:
     """State enum serializes to the lowercase strings the voice app receives."""
     assert State.IDLE.value == "idle"
