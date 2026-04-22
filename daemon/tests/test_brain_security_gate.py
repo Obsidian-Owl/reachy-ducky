@@ -56,7 +56,6 @@ BASH_CASES: list[tuple[str, bool, str]] = [
     ("git diff main...HEAD", True, "git diff with range"),
     ("git log --oneline -n 20", True, "git log with flags"),
     ("git show HEAD", True, "git show"),
-    ("git branch --show-current", True, "git branch"),
     ("git rev-parse HEAD", True, "git rev-parse"),
     ("git ls-files", True, "git ls-files"),
     ("git ls-tree HEAD", True, "git ls-tree"),
@@ -67,6 +66,19 @@ BASH_CASES: list[tuple[str, bool, str]] = [
     ("git commit -m x", False, "git commit denied"),
     ("git reset --hard HEAD~1", False, "git reset denied"),
     ("git checkout main", False, "git checkout denied"),
+    # P1 from Codex review: `branch` is NOT on the allowlist because its
+    # flagged forms mutate (-d/-D/-m/-M/-c/-C/--set-upstream-to). The gate
+    # validates the subcommand token only, so listing `branch` would let
+    # those flagged forms slip through the "read-only" contract. Callers
+    # that need the current branch use `git rev-parse --abbrev-ref HEAD`.
+    ("git branch", False, "git branch (list) denied - no flag-level gate"),
+    ("git branch --show-current", False, "git branch --show-current denied"),
+    ("git branch -d feature", False, "git branch -d (delete) denied"),
+    ("git branch -D feature", False, "git branch -D (force-delete) denied"),
+    ("git branch -m old new", False, "git branch -m (rename) denied"),
+    ("git branch -M old new", False, "git branch -M (force-rename) denied"),
+    ("git branch -c old new", False, "git branch -c (copy) denied"),
+    ("git branch --set-upstream-to=origin/x", False, "git branch upstream mutation denied"),
     ("gh pr create", False, "gh is not git"),
     ("ls -la", False, "ls rejected"),
     ("rm -rf /tmp", False, "rm rejected"),

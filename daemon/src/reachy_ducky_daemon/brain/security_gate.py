@@ -50,10 +50,16 @@ __all__ = ["security_gate"]
 # Only these read-only `git` subcommands are permitted via Bash.
 # The anchored regex rejects anything after the subcommand keyword unless
 # followed by whitespace or end-of-string, so `gitpush` / `git-log` don't slip.
+#
+# NOT on this list on purpose: `branch`. Though `git branch` alone lists
+# branches (read), `git branch -d/-D/-m/-M/-c/-C/--set-upstream-to` all
+# mutate refs. Since `_is_allowed_bash` only validates the subcommand
+# token (not its flags), listing `branch` would let those mutating forms
+# slip through the "read-only" gate. Callers that need the current
+# branch should use `rev-parse --abbrev-ref HEAD`; listing remote
+# branches can use `for-each-ref` if added later.
 _BASH_ALLOWLIST = re.compile(
-    r"^\s*git\s+"
-    r"(status|diff|log|show|branch|rev-parse|ls-files|ls-tree|describe|rev-list)"
-    r"(\s|$)"
+    r"^\s*git\s+" r"(status|diff|log|show|rev-parse|ls-files|ls-tree|describe|rev-list)" r"(\s|$)"
 )
 
 # Shell metacharacters that would let a command escape the allowlist by
