@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess  # nosec B404 — used only for controlled, list-form git/claude CLI calls (not user-shell input)
+import subprocess  # nosec B404 — used only to invoke the `claude` CLI for an auth-status check; list-form, no shell, no user-controlled args
 from dataclasses import dataclass
 from pathlib import Path
 
