@@ -15,6 +15,7 @@ from unittest.mock import patch
 from reachy_ducky_daemon.specialists.pr_reviewer import (
     _GH_TIMEOUT_SECONDS,
     _current_branch,
+    _derive_flags,
     _fetch_check_runs,
     _fetch_diff,
     _fetch_pr_metadata,
@@ -321,3 +322,82 @@ def test_find_pr_for_branch_surfaces_gh_failure_as_diagnostic(tmp_path: Path) ->
     assert pr_number is None
     assert err is not None
     assert "authentication" in err.lower() or "failed" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Flag derivation
+# ---------------------------------------------------------------------------
+
+
+def test_derive_flags_no_pr_found_short_circuits() -> None:
+    """Empty PR dict → ``no-pr-found`` and nothing else (other fields are meaningless)."""
+    flags = _derive_flags(pr={}, comments=[], check_runs=[])
+    assert flags == ["no-pr-found"]
+
+
+def test_derive_flags_ci_green_when_all_success() -> None:
+    """All check-runs conclude success → ``ci-green``."""
+    runs: list[dict[str, object]] = [
+        {"conclusion": "success"},
+        {"conclusion": "success"},
+    ]
+    flags = _derive_flags(pr={"number": 1}, comments=[], check_runs=runs)
+    assert "ci-green" in flags
+    assert "ci-red" not in flags
+    assert "ci-pending" not in flags
+
+
+def test_derive_flags_ci_red_when_any_failure() -> None:
+    """Any failure/cancelled/timed_out → ``ci-red`` (failure wins over pending)."""
+    runs: list[dict[str, object]] = [
+        {"conclusion": "success"},
+        {"conclusion": "failure"},
+        {"status": "in_progress", "conclusion": None},
+    ]
+    flags = _derive_flags(pr={"number": 1}, comments=[], check_runs=runs)
+    assert "ci-red" in flags
+    assert "ci-green" not in flags
+    assert "ci-pending" not in flags
+
+
+def test_derive_flags_ci_pending_when_in_progress_without_failure() -> None:
+    """Only pending + success (no failure) → ``ci-pending``."""
+    runs: list[dict[str, object]] = [
+        {"conclusion": "success"},
+        {"status": "in_progress", "conclusion": None},
+    ]
+    flags = _derive_flags(pr={"number": 1}, comments=[], check_runs=runs)
+    assert "ci-pending" in flags
+    assert "ci-red" not in flags
+    assert "ci-green" not in flags
+
+
+def test_derive_flags_no_ci_flag_when_no_check_runs() -> None:
+    """Empty check-runs list → no ci-* flag (nothing to report about CI)."""
+    flags = _derive_flags(pr={"number": 1}, comments=[], check_runs=[])
+    assert not any(f.startswith("ci-") for f in flags)
+
+
+def test_derive_flags_has_unresolved_comments_when_nonzero() -> None:
+    """Any comment present → ``has-unresolved-comments``."""
+    flags = _derive_flags(pr={"number": 1}, comments=[{"id": 1}], check_runs=[])
+    assert "has-unresolved-comments" in flags
+
+
+def test_derive_flags_no_unresolved_comments_flag_when_empty() -> None:
+    """Empty comments list → no unresolved-comments flag."""
+    flags = _derive_flags(pr={"number": 1}, comments=[], check_runs=[])
+    assert "has-unresolved-comments" not in flags
+
+
+def test_derive_flags_emits_merge_conflict_from_mergeable_state() -> None:
+    """mergeable == CONFLICTING → ``merge-conflict``; other states don't emit it."""
+    flags_conflict = _derive_flags(
+        pr={"number": 1, "mergeable": "CONFLICTING"}, comments=[], check_runs=[]
+    )
+    assert "merge-conflict" in flags_conflict
+
+    flags_clean = _derive_flags(
+        pr={"number": 1, "mergeable": "MERGEABLE"}, comments=[], check_runs=[]
+    )
+    assert "merge-conflict" not in flags_clean

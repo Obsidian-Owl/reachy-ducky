@@ -25,6 +25,7 @@ __all__ = [
     "_GH_TIMEOUT_SECONDS",
     "_PR_VIEW_FIELDS",
     "_current_branch",
+    "_derive_flags",
     "_fetch_check_runs",
     "_fetch_diff",
     "_fetch_pr_metadata",
@@ -32,6 +33,12 @@ __all__ = [
     "_find_pr_for_branch",
     "_run_gh",
 ]
+
+# GitHub check-run conclusion values that indicate failure. Used by
+# ``_derive_flags`` to emit the ``ci-red`` flag. ``cancelled`` and
+# ``timed_out`` count as failures for merge-readiness (you can't
+# confirm passage); ``neutral`` and ``skipped`` do not.
+_FAILURE_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out", "action_required"})
 
 _GH_TIMEOUT_SECONDS = 30.0
 
@@ -257,3 +264,57 @@ def _find_pr_for_branch(
     if not isinstance(number, int):
         return None, "gh pr list returned non-int PR number"
     return number, None
+
+
+def _derive_flags(
+    pr: dict[str, object],
+    comments: list[dict[str, object]],
+    check_runs: list[dict[str, object]],
+) -> list[str]:
+    """Compute objective machine-tags from pre-fetched PR data.
+
+    Deliberately emits *only* facts derivable without an LLM — the risk
+    inferences (``risk:scope-creep``, ``recommend:push-fix``) live in
+    the brain's summary prose. Flags are stable across brain-output
+    evolution and safe for the menu-bar / phase-C interruption tiers to
+    branch on directly.
+
+    CI-state precedence mirrors GitHub's own UI: **failure wins over
+    pending**. Any ``failure`` / ``cancelled`` / ``timed_out`` /
+    ``action_required`` conclusion yields ``ci-red`` even if other runs
+    are still in progress; pending-without-failure yields
+    ``ci-pending``; all-success yields ``ci-green``. Zero check-runs
+    emits no ``ci-*`` flag (absence of signal ≠ green).
+    """
+    if not pr:
+        return ["no-pr-found"]
+
+    flags: list[str] = []
+
+    if check_runs:
+        has_failure = any(
+            isinstance(r, dict) and r.get("conclusion") in _FAILURE_CONCLUSIONS for r in check_runs
+        )
+        has_pending = any(
+            isinstance(r, dict)
+            and (
+                r.get("status") == "in_progress"
+                or r.get("status") == "queued"
+                or (r.get("conclusion") is None and r.get("status") != "completed")
+            )
+            for r in check_runs
+        )
+        if has_failure:
+            flags.append("ci-red")
+        elif has_pending:
+            flags.append("ci-pending")
+        else:
+            flags.append("ci-green")
+
+    if comments:
+        flags.append("has-unresolved-comments")
+
+    if pr.get("mergeable") == "CONFLICTING":
+        flags.append("merge-conflict")
+
+    return flags
