@@ -24,10 +24,12 @@ from pathlib import Path
 __all__ = [
     "_GH_TIMEOUT_SECONDS",
     "_PR_VIEW_FIELDS",
+    "_current_branch",
     "_fetch_check_runs",
     "_fetch_diff",
     "_fetch_pr_metadata",
     "_fetch_review_comments",
+    "_find_pr_for_branch",
     "_run_gh",
 ]
 
@@ -186,3 +188,72 @@ def _fetch_check_runs(
     if not isinstance(runs, list):
         return [], f"gh api {endpoint} returned check_runs of unexpected type"
     return [r for r in runs if isinstance(r, dict)], None
+
+
+def _current_branch(cwd: Path) -> tuple[str, str | None]:
+    """Return ``(branch_name, error_or_None)`` for the checkout at ``cwd``.
+
+    Mirrors ``plan_reviewer._current_branch`` (plan_reviewer.py:89). Kept
+    duplicated rather than factored out because the two specialists
+    should not import private helpers across modules — if a third
+    specialist needs it, promote to a shared ``specialists/_subprocess``
+    module at that point.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603  # nosec B603 B607 — list form, read-only git only
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_GH_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "unknown", f"git rev-parse failed: {exc}"
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip() or "non-zero exit"
+        return "unknown", f"git rev-parse failed: {stderr}"
+    return proc.stdout.strip() or "unknown", None
+
+
+def _find_pr_for_branch(
+    branch: str,
+    cwd: Path,
+) -> tuple[int | None, str | None]:
+    """Return ``(pr_number_or_None, error_or_None)`` for ``branch``'s open PR.
+
+    Uses ``gh pr list --head <branch> --state open --json number`` — the
+    repo context is inferred from the ``cwd``'s upstream remote the same
+    way ``gh pr view`` infers it.
+
+    **Distinguishing "no PR" from "couldn't ask":** a successful
+    ``gh`` call returning an empty list yields ``(None, None)``; a
+    subprocess or non-zero exit yields ``(None, error_string)``. The
+    orchestrator needs this distinction to decide between "graceful
+    no-PR digest" and "real diagnostic".
+    """
+    try:
+        proc = _run_gh(
+            ["pr", "list", "--head", branch, "--state", "open", "--json", "number"],
+            cwd=cwd,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"gh pr list --head {branch} failed: {exc}"
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip() or "non-zero exit"
+        return None, f"gh pr list --head {branch} failed: {stderr}"
+    try:
+        parsed = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return None, f"gh pr list emitted unparseable JSON: {exc}"
+    if not isinstance(parsed, list):
+        return None, "gh pr list returned non-list JSON"
+    if not parsed:
+        return None, None
+    first = parsed[0]
+    if not isinstance(first, dict) or "number" not in first:
+        return None, "gh pr list returned unexpected entry shape"
+    number = first["number"]
+    if not isinstance(number, int):
+        return None, "gh pr list returned non-int PR number"
+    return number, None

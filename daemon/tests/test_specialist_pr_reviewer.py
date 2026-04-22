@@ -14,10 +14,12 @@ from unittest.mock import patch
 
 from reachy_ducky_daemon.specialists.pr_reviewer import (
     _GH_TIMEOUT_SECONDS,
+    _current_branch,
     _fetch_check_runs,
     _fetch_diff,
     _fetch_pr_metadata,
     _fetch_review_comments,
+    _find_pr_for_branch,
     _run_gh,
 )
 
@@ -244,3 +246,78 @@ def test_fetch_check_runs_surfaces_unexpected_shape_as_diagnostic(
     assert runs == []
     assert err is not None
     assert "unexpected" in err.lower() or "shape" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Auto-detect: current branch + find-PR-for-branch
+# ---------------------------------------------------------------------------
+
+
+def test_current_branch_reads_git_rev_parse(tmp_path: Path) -> None:
+    """_current_branch shells ``git rev-parse --abbrev-ref HEAD``."""
+    fake_proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="feat-retry\n", stderr="")
+    with patch("subprocess.run", return_value=fake_proc) as m:
+        branch, err = _current_branch(tmp_path)
+
+    assert branch == "feat-retry"
+    assert err is None
+    assert m.call_args.args[0] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+
+
+def test_current_branch_surfaces_git_failure_as_diagnostic(tmp_path: Path) -> None:
+    """git rev-parse failure returns ``("unknown", error)`` — no exception."""
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=128, stdout="", stderr="fatal: not a git repository"
+    )
+    with patch("subprocess.run", return_value=fake_proc):
+        branch, err = _current_branch(tmp_path)
+
+    assert branch == "unknown"
+    assert err is not None
+    assert "not a git repository" in err
+
+
+def test_find_pr_for_branch_picks_first_open(tmp_path: Path) -> None:
+    """_find_pr_for_branch returns the first open PR number for ``head=<branch>``."""
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout='[{"number": 42, "state": "OPEN"}]', stderr=""
+    )
+    with patch("subprocess.run", return_value=fake_proc) as m:
+        pr_number, err = _find_pr_for_branch(branch="feat-retry", cwd=tmp_path)
+
+    assert pr_number == 42
+    assert err is None
+    argv = m.call_args.args[0]
+    assert argv[:3] == ["gh", "pr", "list"]
+    assert "--head" in argv
+    assert "feat-retry" in argv
+    assert "--state" in argv
+    assert "open" in argv
+
+
+def test_find_pr_for_branch_none_when_no_pr(tmp_path: Path) -> None:
+    """Empty ``gh`` list → ``(None, None)`` — absence of a PR is not an error."""
+    fake_proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="[]", stderr="")
+    with patch("subprocess.run", return_value=fake_proc):
+        pr_number, err = _find_pr_for_branch(branch="feat-retry", cwd=tmp_path)
+
+    assert pr_number is None
+    assert err is None
+
+
+def test_find_pr_for_branch_surfaces_gh_failure_as_diagnostic(tmp_path: Path) -> None:
+    """Non-zero ``gh`` exit returns ``(None, error)``.
+
+    Distinguishes "no PR for this branch" (None, None) from
+    "couldn't ask GitHub" (None, error_string) — the orchestrator
+    routes these to different prompts.
+    """
+    fake_proc = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="", stderr="authentication required"
+    )
+    with patch("subprocess.run", return_value=fake_proc):
+        pr_number, err = _find_pr_for_branch(branch="feat-retry", cwd=tmp_path)
+
+    assert pr_number is None
+    assert err is not None
+    assert "authentication" in err.lower() or "failed" in err.lower()
