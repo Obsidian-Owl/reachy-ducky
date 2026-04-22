@@ -34,8 +34,16 @@ markers = [
 # that ship no stubs. Prefer real typing when available.
 #   rumps: macOS-only menu-bar lib, no stubs / py.typed. Used only from
 #          menubar.main via a lazy import behind `sys.platform == "darwin"`.
+#   mediapipe: face-detection backend used by app.embodiment.gaze; the
+#          upstream wheel ships no stubs / py.typed marker. The heavy
+#          import is deferred into gaze_loop (hardware-tier only), but
+#          mypy still needs this entry to resolve the module reference.
 [[tool.mypy.overrides]]
 module = "rumps"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "mediapipe"
 ignore_missing_imports = true
 
 # Pyright config lives in ./pyrightconfig.json (takes precedence over

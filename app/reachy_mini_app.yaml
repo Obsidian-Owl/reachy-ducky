@@ -1,0 +1,8 @@
+title: reachy-ducky
+emoji: "\U0001F986"
+python_version: "3.12"
+app_class: reachy_ducky_app.main.ReachyDuckyApp
+description: >
+  A read-only rubber-ducky development companion: watches your agentic
+  SWE workflow (via a Mac daemon), answers questions in conversation,
+  flags concerns during SDD flows. Does not write code.
