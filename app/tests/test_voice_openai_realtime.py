@@ -10,9 +10,13 @@ the bottom of this file, which is gated by ``REACHY_DUCKY_RUN_INTEGRATION``
 from __future__ import annotations
 
 import os
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from reachy_ducky_app.voice.openai_realtime import OpenAIRealtimeVoice
+from reachy_ducky_app.voice.openai_realtime import (
+    OpenAIRealtimeVoice,
+    OpenAIRealtimeVoiceTurn,
+)
 
 
 def test_construction_reads_api_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,6 +80,94 @@ def test_module_exports_openai_realtime_voice_turn() -> None:
     assert OpenAIRealtimeVoiceTurn is Direct
 
 
+@pytest.mark.asyncio
+async def test_start_turn_enters_and_exits_sdk_connect_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``start_turn`` must both enter *and* exit the SDK's connect() CM.
+
+    Regression for bug I1 (websocket leak): the old code called
+    ``manager.enter()`` and never closed the connection. With the
+    async-context-manager shape, the outer ``async with`` in the caller
+    drives ``__aexit__`` on the SDK manager, releasing the websocket.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    # Fake AsyncRealtimeConnection: minimal surface start_turn touches is
+    # `.session.update(...)`. The turn object stores it untouched.
+    fake_connection = MagicMock(name="AsyncRealtimeConnection")
+    fake_connection.session = MagicMock()
+    fake_connection.session.update = AsyncMock()
+
+    # Fake AsyncRealtimeConnectionManager: an async context manager.
+    connect_manager = MagicMock(name="AsyncRealtimeConnectionManager")
+    connect_manager.__aenter__ = AsyncMock(return_value=fake_connection)
+    connect_manager.__aexit__ = AsyncMock(return_value=None)
+
+    # Fake AsyncOpenAI: its .realtime.connect(model=...) returns the CM.
+    fake_realtime = MagicMock()
+    fake_realtime.connect = MagicMock(return_value=connect_manager)
+    fake_client = MagicMock()
+    fake_client.realtime = fake_realtime
+
+    def _fake_async_openai(*, api_key: str) -> MagicMock:
+        assert api_key == "sk-test"
+        return fake_client
+
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_async_openai)
+
+    voice = OpenAIRealtimeVoice(model="gpt-realtime-test")
+
+    async with voice.start_turn() as turn:
+        # Manager entered; connection yielded as the turn's underlying connection.
+        connect_manager.__aenter__.assert_awaited_once()
+        connect_manager.__aexit__.assert_not_awaited()
+        assert isinstance(turn, OpenAIRealtimeVoiceTurn)
+        assert turn.connection is fake_connection
+
+    # After the async-with in this test exits: manager must have been exited.
+    connect_manager.__aexit__.assert_awaited_once()
+    fake_realtime.connect.assert_called_once_with(model="gpt-realtime-test")
+
+
+@pytest.mark.asyncio
+async def test_start_turn_exits_sdk_connect_manager_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exception inside the ``async with`` body must still close the CM."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    fake_connection = MagicMock(name="AsyncRealtimeConnection")
+    fake_connection.session = MagicMock()
+    fake_connection.session.update = AsyncMock()
+
+    connect_manager = MagicMock(name="AsyncRealtimeConnectionManager")
+    connect_manager.__aenter__ = AsyncMock(return_value=fake_connection)
+    connect_manager.__aexit__ = AsyncMock(return_value=None)
+
+    fake_realtime = MagicMock()
+    fake_realtime.connect = MagicMock(return_value=connect_manager)
+    fake_client = MagicMock()
+    fake_client.realtime = fake_realtime
+
+    def _fake_async_openai(*, api_key: str) -> MagicMock:
+        return fake_client
+
+    monkeypatch.setattr("openai.AsyncOpenAI", _fake_async_openai)
+
+    voice = OpenAIRealtimeVoice()
+
+    class _BoomError(RuntimeError):
+        pass
+
+    with pytest.raises(_BoomError):
+        async with voice.start_turn():
+            raise _BoomError("explode mid-turn")
+
+    connect_manager.__aenter__.assert_awaited_once()
+    connect_manager.__aexit__.assert_awaited_once()
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_openai_realtime_smoke() -> None:
@@ -85,18 +177,13 @@ async def test_openai_realtime_smoke() -> None:
     Same pattern as the Task 2.3 Claude OAuth smoke: verify construction
     + session-open succeed against the real API. We do not feed audio
     (that needs a mic) and we do not wait for transcripts — scope is
-    strictly "does session-open work."
+    strictly "does session-open work." The ``async with`` drives
+    teardown of the SDK connection so the test process exits cleanly.
     """
     if not os.environ.get("REACHY_DUCKY_RUN_INTEGRATION"):
         pytest.skip("set REACHY_DUCKY_RUN_INTEGRATION=1 to run")
     if not os.environ.get("OPENAI_API_KEY"):
         pytest.skip("OPENAI_API_KEY not set")
     voice = OpenAIRealtimeVoice()
-    turn = await voice.start_turn()
-    assert turn is not None
-    # Clean up the WebSocket so the test process exits cleanly. VoiceTurn
-    # doesn't expose a close method, so reach through to the SDK connection.
-    from reachy_ducky_app.voice.openai_realtime import OpenAIRealtimeVoiceTurn
-
-    assert isinstance(turn, OpenAIRealtimeVoiceTurn)
-    await turn.connection.close()
+    async with voice.start_turn() as turn:
+        assert isinstance(turn, OpenAIRealtimeVoiceTurn)

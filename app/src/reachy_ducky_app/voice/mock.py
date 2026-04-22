@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+
 from .interface import VoiceInterface, VoiceTurn
 
 
@@ -37,5 +40,21 @@ class MockVoice(VoiceInterface):
         # without driving it themselves.
         self._reply = scripted_reply_text
 
-    async def start_turn(self) -> VoiceTurn:
-        return MockVoiceTurn(self._user_text)
+    def start_turn(self) -> AbstractAsyncContextManager[MockVoiceTurn]:
+        """Return an async context manager that yields a :class:`MockVoiceTurn`.
+
+        The mock has no underlying connection to release, but the shape
+        matches :class:`~reachy_ducky_app.voice.openai_realtime.OpenAIRealtimeVoice`'s
+        so tests exercise the same control-flow as production. Subclasses
+        (e.g. the conversation-test spies) override this method and
+        wrap/replace the returned CM; declaring the return type as
+        :class:`AbstractAsyncContextManager` lets those overrides compose
+        naturally without fighting mypy about the private
+        ``_AsyncGeneratorContextManager`` coming out of
+        ``@asynccontextmanager``.
+        """
+        return self._make_turn_cm()
+
+    @asynccontextmanager
+    async def _make_turn_cm(self) -> AsyncIterator[MockVoiceTurn]:
+        yield MockVoiceTurn(self._user_text)

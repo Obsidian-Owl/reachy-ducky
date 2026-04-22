@@ -40,20 +40,25 @@ async def run_one_turn(
     daemon: DaemonClient,
     project_slug: str | None = None,
 ) -> None:
-    """Run one user-Ducky turn. No-op if the state machine is MUTED."""
+    """Run one user-Ducky turn. No-op if the state machine is MUTED.
+
+    The voice turn is driven under ``async with voice.start_turn()`` so
+    its underlying connection (e.g. the OpenAI Realtime WebSocket) is
+    released whether the turn completes normally or raises mid-flight.
+    """
     if sm.state == State.MUTED:
         return
 
     sm.transition(State.LISTENING)
-    turn = await voice.start_turn()
-    user_text = await turn.get_user_text()
+    async with voice.start_turn() as turn:
+        user_text = await turn.get_user_text()
 
-    sm.transition(State.THINKING)
-    reply = await daemon.brain_query(user_text, project_slug=project_slug)
+        sm.transition(State.THINKING)
+        reply = await daemon.brain_query(user_text, project_slug=project_slug)
 
-    # Speak while in LISTENING posture — the robot looks at the user
-    # as Ducky replies, not while thinking.
-    sm.transition(State.LISTENING)
-    await turn.speak_text(reply.text)
+        # Speak while in LISTENING posture — the robot looks at the user
+        # as Ducky replies, not while thinking.
+        sm.transition(State.LISTENING)
+        await turn.speak_text(reply.text)
 
     sm.transition(State.IDLE)

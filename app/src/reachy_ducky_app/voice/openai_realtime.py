@@ -51,17 +51,26 @@ to a menu-bar preview) but is unused here.
 
 Lifecycle
 ---------
-:meth:`OpenAIRealtimeVoice.start_turn` opens a fresh ``AsyncRealtimeConnection``
-per turn. The :class:`VoiceTurn` contract does not declare a close method, so
-callers who want deterministic teardown reach through
-:attr:`OpenAIRealtimeVoiceTurn.connection` and call ``.close()`` directly.
-This matches the Phase A plan's shape; a future extension may add
-``VoiceTurn.aclose`` to the shared contract.
+:meth:`OpenAIRealtimeVoice.start_turn` is an ``@asynccontextmanager`` that
+opens a fresh ``AsyncRealtimeConnection`` per turn via
+``async with client.realtime.connect(...)``. The outer ``async with`` in
+the caller drives the connection's ``__aexit__`` — closing the websocket
+whether the turn body returned normally or raised. Callers therefore use::
+
+    async with voice.start_turn() as turn:
+        await turn.get_user_text()
+        await turn.speak_text(reply)
+    # websocket closed here, unconditionally
+
+This structural cleanup is what fixed bug I1 — an earlier revision
+returned a bare ``VoiceTurn`` and leaked the websocket on every turn.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
@@ -78,8 +87,11 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
     """One realtime WebSocket session = one turn.
 
     See module docstring for the verified SDK shape. ``connection`` is an
-    ``openai.resources.realtime.realtime.AsyncRealtimeConnection`` obtained
-    from ``AsyncRealtimeConnectionManager.enter()``.
+    ``openai.resources.realtime.realtime.AsyncRealtimeConnection`` yielded
+    from ``async with AsyncRealtimeConnectionManager``. Its lifetime is
+    owned by the enclosing :meth:`OpenAIRealtimeVoice.start_turn` context
+    manager — this class does not close the connection itself; that would
+    race with the outer ``async with`` and risk double-close.
     """
 
     def __init__(self, connection: AsyncRealtimeConnection) -> None:
@@ -88,7 +100,7 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
 
     @property
     def connection(self) -> AsyncRealtimeConnection:
-        """Escape hatch to the underlying SDK connection for lifecycle control."""
+        """Escape hatch to the underlying SDK connection for advanced callers."""
         return self._connection
 
     async def get_user_text(self) -> str:
@@ -147,8 +159,16 @@ class OpenAIRealtimeVoice(VoiceInterface):
         if not self._api_key:
             raise ValueError("OPENAI_API_KEY not set and no api_key= argument provided")
 
-    async def start_turn(self) -> VoiceTurn:
-        """Open a fresh realtime WebSocket and wrap it in a :class:`VoiceTurn`.
+    @asynccontextmanager
+    async def start_turn(self) -> AsyncIterator[OpenAIRealtimeVoiceTurn]:
+        """Open a fresh realtime WebSocket and yield a :class:`VoiceTurn`.
+
+        The SDK's ``client.realtime.connect(model=...)`` returns an
+        ``AsyncRealtimeConnectionManager``; entering it yields the live
+        :class:`AsyncRealtimeConnection`. We hold that manager as an
+        ``async with`` here, so when the caller's ``async with`` closes,
+        our ``finally``-equivalent drives the SDK manager's ``__aexit__``
+        and the websocket is released.
 
         Lazy-imports :class:`openai.AsyncOpenAI` so unit tests that only
         exercise construction-shape don't pay the SDK's import cost.
@@ -156,6 +176,5 @@ class OpenAIRealtimeVoice(VoiceInterface):
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(api_key=self._api_key)
-        manager = client.realtime.connect(model=self._model)
-        connection = await manager.enter()
-        return OpenAIRealtimeVoiceTurn(connection)
+        async with client.realtime.connect(model=self._model) as connection:
+            yield OpenAIRealtimeVoiceTurn(connection)

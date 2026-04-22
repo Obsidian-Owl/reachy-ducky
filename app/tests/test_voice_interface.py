@@ -19,18 +19,35 @@ def test_voice_turn_is_abstract() -> None:
 
 
 async def test_mock_voice_starts_turn_returning_voice_turn_instance() -> None:
-    """MockVoice.start_turn returns a concrete VoiceTurn (MockVoiceTurn)."""
+    """MockVoice.start_turn yields a concrete VoiceTurn (MockVoiceTurn) via async-with."""
     voice = MockVoice(scripted_user_text="hello")
-    turn = await voice.start_turn()
-    assert isinstance(turn, VoiceTurn)
+    async with voice.start_turn() as turn:
+        assert isinstance(turn, VoiceTurn)
+        assert isinstance(turn, MockVoiceTurn)
+
+
+async def test_mock_voice_start_turn_is_async_context_manager() -> None:
+    """``start_turn`` returns an object usable with ``async with``.
+
+    Guards against regressions where the method becomes a bare coroutine
+    returning a VoiceTurn — which would leak any resource the production
+    implementation holds (e.g. the OpenAI realtime WebSocket).
+    """
+    voice = MockVoice(scripted_user_text="x")
+    cm = voice.start_turn()
+    # Must be an async context manager, not a coroutine.
+    assert hasattr(cm, "__aenter__")
+    assert hasattr(cm, "__aexit__")
+    turn = await cm.__aenter__()
     assert isinstance(turn, MockVoiceTurn)
+    await cm.__aexit__(None, None, None)
 
 
 async def test_mock_voice_turn_delivers_scripted_user_text() -> None:
     """get_user_text returns the text the MockVoice was scripted with."""
     voice = MockVoice(scripted_user_text="hi ducky")
-    turn = await voice.start_turn()
-    assert await turn.get_user_text() == "hi ducky"
+    async with voice.start_turn() as turn:
+        assert await turn.get_user_text() == "hi ducky"
 
 
 async def test_mock_voice_turn_records_spoken_text() -> None:
