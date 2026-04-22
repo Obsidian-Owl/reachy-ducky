@@ -1,0 +1,93 @@
+name: Sim-integration tests
+
+# Exercise ReachyMotionDriver against a live reachy-mini-daemon --sim
+# (MuJoCo backend, headless, localhost-only) on every PR and push to main.
+#
+# Closes the gap that the mocked unit tier leaves open: ``ReachyMotionDriver``
+# carries six ``# type: ignore[attr-defined]`` suppressions (issue #18) because
+# the reachy-mini SDK ships no ``py.typed`` marker. If a future release
+# renames a method (e.g. ``goto_sleep`` → ``go_to_sleep``), these tests fail
+# where the unit tier stays green.
+#
+# Scope: motion + daemon lifecycle only. Audio / mic / speaker / wake are
+# hardware-tier and stay under ``@pytest.mark.hardware``.
+#
+# Pattern cribbed from pollen-robotics/reachy_mini's linux_sim job; see
+# https://github.com/pollen-robotics/reachy_mini/blob/main/.github/workflows/reachy_mini_physical_ci.yml
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sim:
+    name: Sim-integration tests (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.30"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      # Option (a) from the design brief: keep one venv (the uv workspace).
+      # ``--extra robot`` pulls reachy-mini via app/pyproject.toml, then we
+      # layer the ``[mujoco]`` extra on top via ``uv pip install`` so the
+      # daemon has a MuJoCo backend. One venv means the daemon we spawn
+      # and the pytest run that talks to it share the same reachy-mini
+      # version — no drift between client and server.
+      - name: Install workspace with robot extra
+        run: uv sync --all-packages --group dev --extra robot
+
+      - name: Add MuJoCo backend for the sim daemon
+        run: uv pip install 'reachy-mini[mujoco]'
+
+      - name: Start reachy-mini-daemon (sim, headless, localhost-only)
+        run: |
+          uv run reachy-mini-daemon \
+            --robot-name reachy_mini_sim \
+            --sim \
+            --headless \
+            --localhost-only &
+          echo $! > sim_daemon.pid
+          echo "Daemon PID: $(cat sim_daemon.pid)"
+
+      - name: Wait for the sim daemon to be running
+        run: |
+          for i in {1..20}; do
+            STATUS=$(curl -s http://localhost:8000/api/daemon/status \
+              | grep -o '"state":"[^"]*"' | cut -d'"' -f4)
+            echo "Attempt $i: daemon status is '$STATUS'"
+            if [ "$STATUS" = "running" ]; then
+              echo "[OK] Sim daemon is running"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "[ERROR] Sim daemon did not reach 'running' after 60s"
+          exit 1
+
+      - name: Run sim-tier tests
+        run: uv run pytest -m sim -q
+
+      - name: Stop reachy-mini-daemon
+        if: always()
+        run: |
+          curl -X POST "http://localhost:8000/api/daemon/stop?goto_sleep=true" \
+            || echo "API stop failed, falling back to kill"
+          if [ -f sim_daemon.pid ]; then
+            kill "$(cat sim_daemon.pid)" 2>/dev/null || echo "Daemon already stopped"
+            rm sim_daemon.pid
+          fi
