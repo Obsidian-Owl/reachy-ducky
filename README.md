@@ -36,4 +36,60 @@ smoke procedure and known gaps.
 
 See `CLAUDE.md` for the full developer workflow (lint, type-check, pre-commit).
 
+## Networking & auth
+
+Reachy Ducky runs as two processes on two machines: a daemon on your Mac and an
+app on your Reachy Mini. They talk over HTTP. The default bind is
+`127.0.0.1:8765` (loopback-only), which won't work across devices — so for
+real use you need a trusted channel.
+
+### Recommended: Tailscale (zero-trust mesh)
+
+1. Install Tailscale on your Mac and on your Reachy (`brew install tailscale` /
+   `curl -fsSL https://tailscale.com/install.sh | sh`). Run `sudo tailscale up`
+   on both. Both devices appear in your tailnet with MagicDNS names like
+   `<your-mac>.<your-tailnet>.ts.net` (example only — substitute your own).
+2. On the Mac, run the daemon bound to all interfaces so the tailnet can
+   reach it:
+   ```bash
+   REACHY_DUCKY_DAEMON_HOST=0.0.0.0 uv run reachy-ducky-daemon
+   ```
+   Tailscale's ACLs (and your firewall) restrict who can reach :8765 — only
+   devices on your tailnet.
+3. On the Reachy, point the app at the Mac's MagicDNS name:
+   ```bash
+   DAEMON_URL=http://<your-mac>.<your-tailnet>.ts.net:8765
+   ```
+
+No shared secret, no token rotation. If a device is lost, revoke it in the
+Tailscale admin console.
+
+### Alternative: bearer token over LAN
+
+If you'd rather not use Tailscale, you can run the daemon with a shared token.
+
+1. On the Mac:
+   ```bash
+   export REACHY_DUCKY_AUTH_TOKEN="$(openssl rand -hex 32)"
+   export REACHY_DUCKY_DAEMON_HOST=0.0.0.0
+   uv run reachy-ducky-daemon
+   ```
+2. On the Reachy, set the same token and point at the Mac:
+   ```bash
+   DAEMON_URL=http://<your-mac>.local:8765
+   DAEMON_AUTH_TOKEN=<paste the same token>
+   ```
+3. The daemon requires `Authorization: Bearer <token>` on every route except
+   the three open paths `/health`, `/docs`, and `/openapi.json`. Treat the
+   token like a password — do not commit it.
+
+### Warning
+
+If you bind the daemon to a non-loopback host **without** setting
+`REACHY_DUCKY_AUTH_TOKEN`, the daemon logs a loud warning on startup
+(`AppConfig.warn_if_exposed_without_auth` in
+`daemon/src/reachy_ducky_daemon/config.py`). Anyone on the same network could
+invoke your Claude subscription and read your code. Either use Tailscale or
+set a token — never both off.
+
 Licensed under Apache 2.0.
