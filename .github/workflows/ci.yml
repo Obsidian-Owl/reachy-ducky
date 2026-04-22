@@ -12,8 +12,12 @@ concurrency:
 
 jobs:
   lint-type-test:
-    name: Lint, type-check, unit tests
-    runs-on: ubuntu-latest
+    name: Lint, type-check, unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,12 +30,21 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         # --group dev installs workspace-wide dev tools (pytest, ruff, mypy,
         # bandit, pytest-asyncio, pytest-httpx). We do NOT use --all-extras
         # here because the app package's `robot` extra pulls reachy-mini,
-        # which has a broken Windows-only transitive dep.
+        # which has a broken Windows-only transitive dep, and the menubar's
+        # `macos` extra pulls rumps which is macOS-only.
         run: uv sync --all-packages --group dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        # On macOS we additionally pull the menubar's `macos` extra so the
+        # real rumps import path is exercised (catches regressions in the
+        # lazy-import contract that a fake-rumps unit test can't see).
+        run: uv sync --all-packages --group dev --extra macos
 
       - name: Ruff lint
         run: uv run ruff check .
@@ -39,8 +52,14 @@ jobs:
       - name: Ruff format (check only)
         run: uv run ruff format --check .
 
-      - name: Mypy (strict)
+      - name: Mypy (strict) — src
         run: uv run mypy --strict daemon/src app/src menubar/src protocol/src
+
+      - name: Mypy (strict) — tests
+        # Match the local lefthook behaviour so a test that fails locally
+        # can never slip through CI. Tests are production-grade per
+        # .claude/rules/testing-standards.md.
+        run: uv run mypy --strict daemon/tests protocol/tests menubar/tests
 
       - name: Bandit (security)
         run: uv run bandit -ll -r daemon/src app/src menubar/src protocol/src
