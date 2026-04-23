@@ -7,6 +7,7 @@ model) without touching callers.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -18,25 +19,73 @@ class WakeDetector(ABC):
 
     Real implementations wrap an ONNX model. :class:`MockWakeDetector` here
     is pure Python and deterministic for tests.
+
+    Exposes :attr:`event` — an ``asyncio.Event`` that :meth:`feed_audio`
+    (or the future ONNX inference path) sets on a detected wake.
+    ``ReachyDuckyApp._run_async`` awaits this event via ``asyncio.wait``
+    so the wake loop never busy-polls.
+
+    Constructing a ``WakeDetector`` outside an event loop is safe:
+    Python 3.10+ ``asyncio.Event()`` is loop-agnostic until ``wait()``
+    is called, so ``load_default_wake_detector()`` can run at import or
+    unit-test setup time without an active loop.
     """
+
+    def __init__(self) -> None:
+        self.event: asyncio.Event = asyncio.Event()
 
     @abstractmethod
     def feed_audio(self, audio_chunk: npt.NDArray[np.int16]) -> bool:
-        """Return True when the wake word is detected in this chunk."""
+        """Return True when the wake word is detected in this chunk.
+
+        Implementations that detect a wake MUST also call
+        ``self.event.set()`` so the awaiting ``_run_async`` loop advances.
+
+        **Thread-safety:** ``asyncio.Event.set()`` is not safe to call
+        directly from a non-event-loop thread — doing so can corrupt
+        the Event's internal state. Real ONNX-backed detectors will
+        typically run inference on a dedicated audio thread; such
+        implementations MUST set the event via
+        ``loop.call_soon_threadsafe(self.event.set)`` (where ``loop``
+        is captured at detector construction time). The mock is
+        thread-safe by construction — tests call ``feed_audio``
+        synchronously from the event-loop thread.
+        """
 
 
 class MockWakeDetector(WakeDetector):
     """Test double.
 
-    ``feed_audio`` always returns False; ``detect_in_text`` is a simple
-    substring check so tests can simulate "heard the phrase".
+    ``feed_audio`` returns False and leaves :attr:`event` unset by default.
+    Pass ``trigger_on_feed=True`` to flip the event (and return True) on
+    every ``feed_audio`` call — useful for exercising the event-driven
+    loop in unit tests without touching ONNX or hardware.
+
+    **Do NOT use ``trigger_on_feed=True`` in production wiring.**
+    ``_run_async`` calls ``wake.event.clear()`` after each turn, so a
+    continuously-fed detector would re-set the event on every audio
+    frame and starve the rest of the loop (every ``asyncio.wait`` would
+    immediately select the wake branch). It's strictly a test hook.
+
+    ``detect_in_text`` is a simple substring check so tests can simulate
+    "heard the phrase".
     """
 
-    def __init__(self, trigger_on: str = "hey ducky") -> None:
+    def __init__(
+        self,
+        trigger_on: str = "hey ducky",
+        *,
+        trigger_on_feed: bool = False,
+    ) -> None:
+        super().__init__()
         self._trigger = trigger_on.lower()
+        self._trigger_on_feed = trigger_on_feed
 
     def feed_audio(self, audio_chunk: npt.NDArray[np.int16]) -> bool:
         del audio_chunk  # mock doesn't analyse audio
+        if self._trigger_on_feed:
+            self.event.set()
+            return True
         return False
 
     def detect_in_text(self, text: str) -> bool:

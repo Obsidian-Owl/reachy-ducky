@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from reachy_ducky_app.main import ReachyDuckyApp, main
 from reachy_ducky_app.voice.audio_io import MicSource, MockMicSource, MockSpeakerSink, SpeakerSink
-from reachy_ducky_app.wake import MockWakeDetector, WakeDetector
+from reachy_ducky_app.wake import MockWakeDetector
 
 
 def test_reachy_ducky_app_imports_cleanly() -> None:
@@ -27,7 +27,7 @@ def test_reachy_ducky_app_imports_cleanly() -> None:
 def test_wake_triggered_placeholder_returns_false() -> None:
     """Baseline lock: the Phase A ``_wake_triggered`` stub always returns False."""
     app = ReachyDuckyApp()
-    assert app._wake_triggered(MockWakeDetector()) is False
+    assert app._wake_triggered() is False
 
 
 async def test_run_async_exits_immediately_when_stop_event_set(
@@ -55,46 +55,136 @@ async def test_run_async_exits_immediately_when_stop_event_set(
     assert run_one_turn_calls == []
 
 
-async def test_run_async_calls_run_one_turn_when_wake_triggers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Wake trigger True on first tick => exactly one ``run_one_turn`` call."""
+async def test_wake_event_drives_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_run_async`` awaits the wake Event — setting it triggers exactly one turn.
+
+    The event-driven contract: the loop blocks on ``wake.event.wait()`` via
+    ``asyncio.wait(FIRST_COMPLETED)``. Firing the event once must drive
+    exactly one ``run_one_turn``, not be busy-polled.
+    """
     monkeypatch.setenv("OPENAI_API_KEY", "test")
 
     run_one_turn_calls: list[dict[str, object]] = []
+    stop = threading.Event()
+
+    injected_wake = MockWakeDetector()
 
     async def _spy_run_one_turn(**kwargs: object) -> None:
         run_one_turn_calls.append(kwargs)
+        # One turn is enough; set stop so the loop exits on the next cycle.
+        stop.set()
 
     monkeypatch.setattr("reachy_ducky_app.main.run_one_turn", _spy_run_one_turn)
-
-    stop = threading.Event()
-
-    class _OneShotApp(ReachyDuckyApp):
-        """Trigger wake exactly once, then stop the loop on the next tick."""
-
-        def __init__(self) -> None:
-            self._calls = 0
-
-        def _wake_triggered(self, wake: WakeDetector) -> bool:
-            del wake
-            self._calls += 1
-            if self._calls == 1:
-                return True
-            stop.set()
-            return False
-
-    app = _OneShotApp()
-    await asyncio.wait_for(
-        app._run_async(reachy_mini=object(), stop_event=stop),
-        timeout=1.0,
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_wake_detector",
+        lambda: injected_wake,
     )
+
+    async def _fire_wake_soon() -> None:
+        # Let _run_async reach its asyncio.wait; then set the event.
+        await asyncio.sleep(0)
+        injected_wake.event.set()
+
+    app = ReachyDuckyApp()
+
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(_fire_wake_soon())
+        tg.create_task(
+            asyncio.wait_for(
+                app._run_async(reachy_mini=object(), stop_event=stop),
+                timeout=1.0,
+            )
+        )
 
     assert len(run_one_turn_calls) == 1
     assert "voice" in run_one_turn_calls[0]
     assert "sm" in run_one_turn_calls[0]
     assert "daemon" in run_one_turn_calls[0]
     assert run_one_turn_calls[0]["project_slug"] is None
+
+
+async def test_stop_wins_when_wake_and_stop_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When wake.event and stop_event both fire before the loop re-checks,
+    stop wins and no additional turn runs.
+
+    Pins the precedence so a future refactor doesn't accidentally let a
+    race cause a turn to fire during shutdown. Pre-setting both events
+    before ``_run_async`` starts is the cleanest way to exercise the
+    decision point: the outer ``while not stop_event.is_set()`` guard
+    must short-circuit regardless of the wake event's state.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    run_one_turn_calls: list[object] = []
+
+    async def _spy_run_one_turn(**kwargs: object) -> None:
+        run_one_turn_calls.append(kwargs)
+
+    injected_wake = MockWakeDetector()
+    injected_wake.event.set()
+
+    monkeypatch.setattr("reachy_ducky_app.main.run_one_turn", _spy_run_one_turn)
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_wake_detector",
+        lambda: injected_wake,
+    )
+
+    app = ReachyDuckyApp()
+    stop = threading.Event()
+    stop.set()
+
+    await asyncio.wait_for(
+        app._run_async(reachy_mini=object(), stop_event=stop),
+        timeout=0.5,
+    )
+
+    assert run_one_turn_calls == []
+
+
+async def test_wake_loop_exits_cleanly_without_firing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop event causes clean exit when the wake event never fires.
+
+    Verifies the stop-bridge wins when ``wake.event`` stays unset: zero
+    turns run, and ``_run_async`` returns promptly after ``stop_event.set()``.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    run_one_turn_calls: list[object] = []
+
+    async def _spy_run_one_turn(**kwargs: object) -> None:
+        run_one_turn_calls.append(kwargs)
+
+    injected_wake = MockWakeDetector()
+
+    monkeypatch.setattr("reachy_ducky_app.main.run_one_turn", _spy_run_one_turn)
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_wake_detector",
+        lambda: injected_wake,
+    )
+
+    stop = threading.Event()
+
+    async def _stop_soon() -> None:
+        await asyncio.sleep(0.3)  # 3x the 0.1s stop-bridge tick; margin for loaded CI
+        stop.set()
+
+    app = ReachyDuckyApp()
+
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(_stop_soon())
+        tg.create_task(
+            asyncio.wait_for(
+                app._run_async(reachy_mini=object(), stop_event=stop),
+                timeout=1.0,
+            )
+        )
+
+    assert run_one_turn_calls == []
+    assert not injected_wake.event.is_set()
 
 
 def test_main_exits_with_stopped_event(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,9 +234,8 @@ async def test_run_async_constructs_voice_with_default_mic_and_speaker(
 
     Guards the commit-3 wiring: ``_run_async`` must call
     :func:`load_default_mic_source` and :func:`load_default_speaker_sink`
-    (the same pattern as ``load_default_wake_detector``) rather than
-    hard-coding Mock impls directly. When the hardware-backed factory
-    bodies land, ``main.py`` should require zero changes.
+    rather than hard-coding Mock impls directly. When the hardware-backed
+    factory bodies land, ``main.py`` should require zero changes.
     """
     monkeypatch.setenv("OPENAI_API_KEY", "test")
 
@@ -191,7 +280,9 @@ async def test_run_async_closes_daemon_client_even_when_turn_raises(
     """If ``run_one_turn`` raises, ``daemon.aclose()`` must still be awaited.
 
     Guards that the ``try/finally`` wraps the whole wake loop, so the
-    pool is drained on crash as well as clean shutdown.
+    pool is drained on crash as well as clean shutdown. Drives the loop
+    via a pre-set ``wake.event`` so the first ``asyncio.wait`` immediately
+    selects the wake branch.
     """
     monkeypatch.setenv("OPENAI_API_KEY", "test")
 
@@ -210,16 +301,15 @@ async def test_run_async_closes_daemon_client_even_when_turn_raises(
 
     monkeypatch.setattr("reachy_ducky_app.main.run_one_turn", _blowing_up)
 
+    injected_wake = MockWakeDetector()
+    injected_wake.event.set()
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_wake_detector",
+        lambda: injected_wake,
+    )
+
     stop = threading.Event()
-
-    class _OneShotApp(ReachyDuckyApp):
-        """Wake triggers once to drive the loop into ``run_one_turn``."""
-
-        def _wake_triggered(self, wake: WakeDetector) -> bool:
-            del wake
-            return True
-
-    app = _OneShotApp()
+    app = ReachyDuckyApp()
 
     with pytest.raises(_BoomError):
         await asyncio.wait_for(

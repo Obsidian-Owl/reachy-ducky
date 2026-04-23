@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import numpy as np
 import pytest
 from reachy_ducky_app.wake import (
@@ -21,6 +23,28 @@ def test_mock_detector_feed_audio_returns_false_for_any_chunk() -> None:
     """MockWakeDetector.feed_audio ignores audio and returns False by design."""
     det = MockWakeDetector()
     assert det.feed_audio(np.zeros(16, dtype=np.int16)) is False
+
+
+def test_wake_detector_event_is_asyncio_event() -> None:
+    """WakeDetector.event is a real asyncio.Event — not an mp or threading analog."""
+    detector = MockWakeDetector()
+    assert isinstance(detector.event, asyncio.Event)
+    assert not detector.event.is_set()
+
+
+def test_mock_wake_detector_trigger_on_feed_sets_event() -> None:
+    """Mock with trigger_on_feed=True sets the event the first time feed_audio is called."""
+    detector = MockWakeDetector(trigger_on_feed=True)
+    assert not detector.event.is_set()
+    detector.feed_audio(np.zeros(16, dtype=np.int16))
+    assert detector.event.is_set()
+
+
+def test_mock_wake_detector_default_does_not_set_event() -> None:
+    """Default MockWakeDetector preserves today's silent-mock semantics."""
+    detector = MockWakeDetector()
+    detector.feed_audio(np.zeros(16, dtype=np.int16))
+    assert not detector.event.is_set()
 
 
 def test_mock_detector_detect_in_text_triggers_on_keyword() -> None:

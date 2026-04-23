@@ -1,3 +1,10 @@
+# Canonical app metadata — the on-robot Pollen dashboard reads this
+# file. Any field defined here is authoritative; the README frontmatter
+# in app/README.md carries ONLY HF-Space-listing presentation chrome
+# (colorFrom/colorTo/sdk/pinned/short_description/tags) that has no
+# on-robot consumer and therefore can't drift against this file. Shared
+# fields (title, emoji, python_version, app_class, description) live
+# here alone. See closed issue #16 for the original dedup rationale.
 title: reachy-ducky
 emoji: "\U0001F986"
 python_version: "3.12"
