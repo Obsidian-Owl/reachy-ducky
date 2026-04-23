@@ -105,6 +105,40 @@ class ReachyMicSource(MicSource):
             yield pcm16.tobytes()
 
 
+class ReachySpeakerSink(SpeakerSink):
+    """Hardware-backed speaker sink: pushes PCM frames to the ReachyMini SDK.
+
+    Wraps ``ReachyMini.media.push_audio_sample()``. Symmetric with
+    :class:`ReachyMicSource`: synchronous SDK call is dispatched to an
+    executor so the voice loop stays unblocked.
+
+    **Format conversion at the adapter boundary.** The SpeakerSink ABC
+    takes PCM16 mono 24 kHz bytes (matches the OpenAI Realtime API
+    upstream); the SDK takes ``npt.NDArray[np.float32]`` (values in
+    ``[-1.0, 1.0]``). This class converts PCM16-bytes → float32 per
+    frame: ``np.frombuffer(pcm, dtype=np.int16).astype(np.float32)``
+    divided by 32767. If a future SDK version takes a different dtype,
+    the :mod:`test_sdk_audio_contract` drift guard fails first.
+
+    **Hardware-only.** Constructors take a duck-typed ``reachy_mini``
+    whose ``.media`` exposes ``push_audio_sample()``; the factory
+    :func:`load_default_speaker_sink` selects this impl over
+    :class:`MockSpeakerSink` when a non-None ``reachy_mini`` is passed
+    (Task 1.4).
+    """
+
+    def __init__(self, reachy_mini: object) -> None:
+        self._mini = reachy_mini
+
+    async def play(self, pcm: bytes) -> None:
+        """Play one PCM16 frame through the SDK speaker (async via executor)."""
+        loop = asyncio.get_running_loop()
+        push = self._mini.media.push_audio_sample  # type: ignore[attr-defined]
+        int16 = np.frombuffer(pcm, dtype=np.int16)
+        float32 = int16.astype(np.float32) / 32767
+        await loop.run_in_executor(None, push, float32)
+
+
 def load_default_mic_source() -> MicSource:
     """Factory for the production mic source.
 

@@ -15,6 +15,7 @@ from reachy_ducky_app.voice.audio_io import (
     MockMicSource,
     MockSpeakerSink,
     ReachyMicSource,
+    ReachySpeakerSink,
     SpeakerSink,
     load_default_mic_source,
     load_default_speaker_sink,
@@ -149,3 +150,74 @@ async def test_reachy_mic_source_is_a_mic_source() -> None:
 
     src = ReachyMicSource(FakeMini())
     assert isinstance(src, MicSource)
+
+
+async def test_reachy_speaker_sink_converts_pcm16_to_float32() -> None:
+    """SpeakerSink ABC takes PCM16 bytes; SDK takes float32 ndarray in [-1, 1].
+
+    Adapter converts at the boundary: ``np.frombuffer(pcm, int16).astype(float32) / 32767``.
+    """
+    received: list[np.ndarray] = []
+
+    class FakeMedia:
+        def push_audio_sample(self, data: np.ndarray) -> None:
+            received.append(data)
+
+    class FakeMini:
+        media = FakeMedia()
+
+    # Construct a known PCM16 frame: int16 value 16384 = 0.5 float32 (approx).
+    int16_frame = np.full(480, 16384, dtype=np.int16)
+    pcm_bytes = int16_frame.tobytes()
+
+    sink = ReachySpeakerSink(FakeMini())
+    await sink.play(pcm_bytes)
+
+    assert len(received) == 1
+    forwarded = received[0]
+    assert forwarded.dtype == np.float32
+    assert forwarded.shape == (480,)
+    # 16384 / 32767 ≈ 0.5000153
+    np.testing.assert_allclose(forwarded, 16384 / 32767, rtol=1e-6)
+
+
+async def test_reachy_speaker_sink_forwards_multiple_frames() -> None:
+    """Multiple ``play()`` calls forward to the SDK in order."""
+    received: list[np.ndarray] = []
+
+    class FakeMedia:
+        def push_audio_sample(self, data: np.ndarray) -> None:
+            received.append(data)
+
+    class FakeMini:
+        media = FakeMedia()
+
+    sink = ReachySpeakerSink(FakeMini())
+
+    frame_a = np.full(480, 1000, dtype=np.int16).tobytes()
+    frame_b = np.full(480, -1000, dtype=np.int16).tobytes()
+    frame_c = np.zeros(480, dtype=np.int16).tobytes()
+
+    await sink.play(frame_a)
+    await sink.play(frame_b)
+    await sink.play(frame_c)
+
+    assert len(received) == 3
+    # Verify per-frame conversion correctness: positive, negative, zero.
+    np.testing.assert_allclose(received[0], 1000 / 32767, rtol=1e-6)
+    np.testing.assert_allclose(received[1], -1000 / 32767, rtol=1e-6)
+    np.testing.assert_allclose(received[2], 0.0, atol=1e-9)
+
+
+async def test_reachy_speaker_sink_is_a_speaker_sink() -> None:
+    """Structural: ReachySpeakerSink satisfies the SpeakerSink contract."""
+
+    class FakeMedia:
+        def push_audio_sample(self, data: np.ndarray) -> None:
+            pass
+
+    class FakeMini:
+        media = FakeMedia()
+
+    sink = ReachySpeakerSink(FakeMini())
+    assert isinstance(sink, SpeakerSink)
