@@ -41,12 +41,12 @@ def _require_dict_schema(schema: Any, *, tool_name: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def testlist_plans_empty_project(tmp_path: Path) -> None:
+def test_list_plans_empty_project(tmp_path: Path) -> None:
     """An empty project tree returns an empty list."""
     assert list_plans(tmp_path) == []
 
 
-def testlist_plans_single_docs_plan(tmp_path: Path) -> None:
+def test_list_plans_single_docs_plan(tmp_path: Path) -> None:
     """A plan under docs/plans/ is discovered and returned relative to root."""
     plan = tmp_path / "docs" / "plans" / "foo.md"
     plan.parent.mkdir(parents=True)
@@ -55,7 +55,7 @@ def testlist_plans_single_docs_plan(tmp_path: Path) -> None:
     assert list_plans(tmp_path) == ["docs/plans/foo.md"]
 
 
-def testlist_plans_nested_docs_plans(tmp_path: Path) -> None:
+def test_list_plans_nested_docs_plans(tmp_path: Path) -> None:
     """Recursive ``**`` glob picks up plans in subdirectories under docs/plans/."""
     (tmp_path / "docs" / "plans" / "sub").mkdir(parents=True)
     (tmp_path / "docs" / "plans" / "sub" / "deep.md").write_text("deep")
@@ -63,7 +63,7 @@ def testlist_plans_nested_docs_plans(tmp_path: Path) -> None:
     assert list_plans(tmp_path) == ["docs/plans/sub/deep.md"]
 
 
-def testlist_plans_multiple_locations_sorted_dedup(tmp_path: Path) -> None:
+def test_list_plans_multiple_locations_sorted_dedup(tmp_path: Path) -> None:
     """Plans from every conventional location are merged, sorted, and deduplicated."""
     (tmp_path / "docs" / "plans").mkdir(parents=True)
     (tmp_path / "specs").mkdir()
@@ -91,14 +91,14 @@ def testlist_plans_multiple_locations_sorted_dedup(tmp_path: Path) -> None:
     ]
 
 
-def testlist_plans_readme_excluded(tmp_path: Path) -> None:
+def test_list_plans_readme_excluded(tmp_path: Path) -> None:
     """README.md at the root is not a conventional plan and is not returned."""
     (tmp_path / "README.md").write_text("readme")
 
     assert list_plans(tmp_path) == []
 
 
-def testlist_plans_daemon_src_excluded(tmp_path: Path) -> None:
+def test_list_plans_daemon_src_excluded(tmp_path: Path) -> None:
     """Markdown under daemon/src/ (not a plans location) is not returned."""
     (tmp_path / "daemon" / "src").mkdir(parents=True)
     (tmp_path / "daemon" / "src" / "foo.md").write_text("arbitrary md")
@@ -106,7 +106,7 @@ def testlist_plans_daemon_src_excluded(tmp_path: Path) -> None:
     assert list_plans(tmp_path) == []
 
 
-def testlist_plans_excludes_directories(tmp_path: Path) -> None:
+def test_list_plans_excludes_directories(tmp_path: Path) -> None:
     """A directory whose name matches the glob is not returned (only files)."""
     target = tmp_path / "docs" / "plans" / "sub.md"
     target.mkdir(parents=True)
@@ -114,14 +114,14 @@ def testlist_plans_excludes_directories(tmp_path: Path) -> None:
     assert list_plans(tmp_path) == []
 
 
-def testlist_plans_dot_plan_md_at_root(tmp_path: Path) -> None:
+def test_list_plans_dot_plan_md_at_root(tmp_path: Path) -> None:
     """``*.plan.md`` files at the root are returned."""
     (tmp_path / "foo.plan.md").write_text("foo plan")
 
     assert list_plans(tmp_path) == ["foo.plan.md"]
 
 
-def testlist_plans_root_name_non_plan_md_excluded(tmp_path: Path) -> None:
+def test_list_plans_root_name_non_plan_md_excluded(tmp_path: Path) -> None:
     """Root ``.md`` files that aren't one of the three named specs nor ``*.plan.md``
     are excluded (e.g., ``NOTES.md``)."""
     (tmp_path / "NOTES.md").write_text("notes")
@@ -130,7 +130,7 @@ def testlist_plans_root_name_non_plan_md_excluded(tmp_path: Path) -> None:
     assert list_plans(tmp_path) == []
 
 
-def testlist_plans_dedup_when_file_matches_multiple_patterns(tmp_path: Path) -> None:
+def test_list_plans_dedup_when_file_matches_multiple_patterns(tmp_path: Path) -> None:
     """A file matching multiple conventional globs is returned only once.
 
     ``foo.plan.md`` living under ``docs/plans/`` matches both ``docs/plans/**/*.md``
