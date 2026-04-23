@@ -445,3 +445,52 @@ async def test_review_omits_unreadable_section_when_all_plans_load(
     assert "# OK Plan" in prompt
     # No empty section header
     assert "=== UNREADABLE PLANS ===" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_review_oserror_diagnostic_omits_absolute_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OSError diagnostics use exc.strerror, not str(exc) — no absolute path leak.
+
+    str(OSError) embeds the full filesystem path, e.g.
+    'OSError: [Errno 13] Permission denied: /Users/.../docs/plans/x.md'.
+    The brain already has the relative path via the '--- {rel} ---'
+    section header; surfacing the absolute path again is a needless
+    leak of usernames / client-project names through the prompt.
+    """
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    secret = plans_dir / "x.md"
+    secret.write_text("# X\n")
+    _commit(tmp_path, "plans")
+
+    # Inject a synthetic OSError via monkeypatch: chmod 0 is unreliable
+    # across platforms (owner reads can still succeed on some setups),
+    # so swap Path.read_text for an implementation that raises OSError
+    # with the absolute path embedded — mirroring real PermissionError
+    # behaviour on POSIX.
+    real_read_text = Path.read_text
+
+    def fake_read_text(
+        self: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> str:
+        if self == secret:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=tmp_path)
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # The relative path appears in the section header (expected).
+    assert "x.md" in prompt
+    # The ABSOLUTE path must NOT appear — that's the leak we're closing.
+    assert str(tmp_path) not in prompt

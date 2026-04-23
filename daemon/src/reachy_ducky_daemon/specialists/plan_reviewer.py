@@ -155,8 +155,18 @@ def _collect_plans(
     for rel in list_plans(repo):
         try:
             content = (repo / rel).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            unreadable.append((rel, f"{type(exc).__name__}: {exc}"))
+        except OSError as exc:
+            # exc.strerror omits the absolute filename that str(exc) embeds —
+            # avoids leaking client-project paths / usernames into the prompt
+            # that flows to Claude. The relative path is already in the section
+            # header at _assemble_prompt's '--- {rel} ---' line, so the brain
+            # has the context it needs. (Code-review I1 follow-up to #5.)
+            detail = exc.strerror or str(exc)
+            unreadable.append((rel, f"OSError: {detail}"))
+            continue
+        except UnicodeDecodeError as exc:
+            # UnicodeDecodeError.__str__ doesn't embed a path; safe as-is.
+            unreadable.append((rel, f"UnicodeDecodeError: {exc}"))
             continue
         readable.append((rel, content))
     return readable, unreadable
