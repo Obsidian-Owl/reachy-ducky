@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from reachy_ducky_app.main import ReachyDuckyApp, main
 from reachy_ducky_app.voice.audio_io import MicSource, MockMicSource, MockSpeakerSink, SpeakerSink
-from reachy_ducky_app.wake import MockWakeDetector, WakeDetector
 
 
 def test_reachy_ducky_app_imports_cleanly() -> None:
@@ -27,7 +26,7 @@ def test_reachy_ducky_app_imports_cleanly() -> None:
 def test_wake_triggered_placeholder_returns_false() -> None:
     """Baseline lock: the Phase A ``_wake_triggered`` stub always returns False."""
     app = ReachyDuckyApp()
-    assert app._wake_triggered(MockWakeDetector()) is False
+    assert app._wake_triggered() is False
 
 
 async def test_run_async_exits_immediately_when_stop_event_set(
@@ -76,8 +75,7 @@ async def test_run_async_calls_run_one_turn_when_wake_triggers(
         def __init__(self) -> None:
             self._calls = 0
 
-        def _wake_triggered(self, wake: WakeDetector) -> bool:
-            del wake
+        def _wake_triggered(self) -> bool:
             self._calls += 1
             if self._calls == 1:
                 return True
@@ -215,8 +213,7 @@ async def test_run_async_closes_daemon_client_even_when_turn_raises(
     class _OneShotApp(ReachyDuckyApp):
         """Wake triggers once to drive the loop into ``run_one_turn``."""
 
-        def _wake_triggered(self, wake: WakeDetector) -> bool:
-            del wake
+        def _wake_triggered(self) -> bool:
             return True
 
     app = _OneShotApp()

@@ -27,7 +27,6 @@ from .embodiment.motion_driver import ReachyMotionDriver
 from .embodiment.state_machine import EmbodimentStateMachine
 from .voice.audio_io import load_default_mic_source, load_default_speaker_sink
 from .voice.openai_realtime import OpenAIRealtimeVoice
-from .wake import WakeDetector, load_default_wake_detector
 
 
 class ReachyDuckyApp:
@@ -64,7 +63,6 @@ class ReachyDuckyApp:
             speaker=load_default_speaker_sink(),
         )
         daemon = DaemonClient.from_env()
-        wake = load_default_wake_detector()
 
         try:
             while not stop_event.is_set():
@@ -74,19 +72,23 @@ class ReachyDuckyApp:
                 # to an audio pump that calls `wake.feed_audio(chunk)` on each
                 # mic buffer; `_wake_triggered` is then the bridge between that
                 # pump and the per-turn conversation loop.
-                if self._wake_triggered(wake):
+                if self._wake_triggered():
                     await run_one_turn(voice=voice, sm=sm, daemon=daemon, project_slug=None)
                 await asyncio.sleep(0.05)
         finally:
             await daemon.aclose()
 
-    def _wake_triggered(self, wake: WakeDetector) -> bool:
+    def _wake_triggered(self) -> bool:
         """Placeholder: returns False until the real audio pump is wired.
+
+        The real audio pump (landing with #23's ReachyMicSource) will feed
+        chunks into ``wake.feed_audio(chunk)`` and set a shared
+        ``asyncio.Event`` that :meth:`_run_async` awaits — this method is
+        the bridge between that pump and the per-turn conversation loop.
 
         Overridable in tests to simulate wake events without needing the
         ONNX model or mic hardware.
         """
-        del wake
         return False
 
 
