@@ -105,6 +105,14 @@ def _capture_diff(repo: Path, branch: str) -> tuple[str, str | None]:
 
     Both paths are ``check=False``; a git failure becomes a diagnostic
     string in the returned ``error`` rather than a raised exception.
+
+    When the merge-base diff fails and the working-tree fallback
+    produces output, the returned ``diff_text`` is prefixed with a
+    one-line ``(fallback: ...)`` banner so the brain can distinguish a
+    deliberate on-main working-tree diff from a degraded feature-branch
+    one. The banner is omitted on the on-main path (``fallback_err`` is
+    ``None`` there — no merge-base was attempted) and on empty-stdout
+    fallbacks.
     """
     if branch != "main":
         try:
@@ -135,6 +143,9 @@ def _capture_diff(repo: Path, branch: str) -> tuple[str, str | None]:
     # 'working-tree diff because on main' from 'working-tree diff because
     # main ref is absent / merge-base failed'.
     if fallback_err is not None and fallback.stdout:
+        # Uses ``(fallback: ...)`` rather than the ``(diagnostic: ...)`` pattern
+        # used by _current_branch and _collect_plans error surfaces — this is a
+        # mode switch ("we changed strategy"), not an error diagnostic.
         banner = (
             "(fallback: using working-tree-vs-HEAD diff; merge-base against main was unavailable)\n"
         )

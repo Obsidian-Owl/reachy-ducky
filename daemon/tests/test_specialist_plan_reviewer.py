@@ -228,6 +228,9 @@ async def test_main_branch_fallback_includes_uncommitted_diff(
 
     prompt = brain.calls[-1].user_utterance
     assert "UNCOMMITTED_EDIT" in prompt
+    # Banner is gated on fallback_err is not None — the on-main path
+    # never attempted a merge-base diff, so no banner appears.
+    assert "(fallback:" not in prompt
 
 
 @pytest.mark.asyncio
@@ -614,7 +617,29 @@ async def test_capture_diff_falls_back_when_main_ref_absent(tmp_path: Path) -> N
     prompt = brain.calls[-1].user_utterance
     # Fallback engaged — uncommitted edit surfaces.
     assert "UNCOMMITTED_EDIT" in prompt
-    # Banner line sits at the top of the diff section.
     diff_section = prompt.split("=== DIFF ===", 1)[1]
-    assert "(fallback:" in diff_section or "fallback:" in diff_section
-    assert "working-tree" in diff_section.lower() or "working tree" in diff_section.lower()
+    diff_lines = [line for line in diff_section.splitlines() if line.strip()]
+    assert diff_lines, "diff section was unexpectedly empty"
+
+    # Banner must appear in the diff section, and it must sit ABOVE the
+    # first ``diff --git`` hunk header. That is the real property:
+    # the brain sees the mode switch before the content it is interpreting.
+    # Position-anchoring on the hunk (not the diagnostic region) keeps the
+    # test robust to future changes in how ``_assemble_prompt`` renders
+    # ``(diagnostic: ...)`` — which is multi-line because git stderr is.
+    fallback_idx = next(
+        (i for i, line in enumerate(diff_lines) if line.startswith("(fallback:")),
+        None,
+    )
+    assert fallback_idx is not None, (
+        f"banner missing from diff section; first 5 lines: {diff_lines[:5]}"
+    )
+    hunk_idx = next(
+        (i for i, line in enumerate(diff_lines) if line.startswith("diff --git ")),
+        len(diff_lines),
+    )
+    assert fallback_idx < hunk_idx, (
+        f"banner must appear before the first diff hunk header; "
+        f"fallback_idx={fallback_idx}, hunk_idx={hunk_idx}"
+    )
+    assert "working-tree" in diff_lines[fallback_idx].lower(), diff_lines[fallback_idx]
