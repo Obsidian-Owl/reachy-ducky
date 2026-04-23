@@ -12,12 +12,8 @@ green and the first real-hardware user hits ``AttributeError``.
 These tests catch that drift by inspecting the real ``ReachyMini``
 class surface (no instance construction; no daemon required; no
 MuJoCo or GStreamer) and asserting our required method names are
-still present.
-
-They run under ``@pytest.mark.sdk`` — opt-in via ``pytest -m sdk``
-and the dedicated ``sdk-contract.yml`` GitHub Actions workflow. Not
-collected by the default pytest run so the common unit tier doesn't
-need the reachy-mini install chain on every machine.
+still present. Since reachy-mini is now a plain base dep, these run
+in the default unit tier on every machine.
 
 Why introspection instead of running against a sim daemon
 ---------------------------------------------------------
@@ -42,8 +38,6 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.sdk
-
 # These are the exact method names ``ReachyMotionDriver`` calls. Keep
 # in sync with ``app/src/reachy_ducky_app/embodiment/motion_driver.py``.
 # If you add a driver method that calls a new SDK method, add it here.
@@ -66,9 +60,9 @@ def test_reachy_mini_class_exposes_required_method(method_name: str) -> None:
     Side-effect proof: the ``hasattr`` consults the class's attribute
     table, which reflects the actual installed SDK version's surface.
     """
-    # reachy-mini is installed only with `--extra robot` (robot + CI).
-    # Default dev venvs don't have it; pyright flags the missing import.
-    from reachy_mini import ReachyMini  # pyright: ignore[reportMissingImports]
+    # reachy-mini ships no `py.typed` marker; narrow mypy ignore at the
+    # single import site avoids a blanket per-module override.
+    from reachy_mini import ReachyMini  # type: ignore[import-untyped]
 
     assert hasattr(ReachyMini, method_name), (
         f"reachy-mini SDK missing `{method_name}`. "
