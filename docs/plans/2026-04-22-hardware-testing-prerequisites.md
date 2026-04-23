@@ -2,16 +2,18 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` (or `superpowers:subagent-driven-development` for same-session execution) to implement this plan task-by-task.
 
+> **Last refreshed 2026-04-23** after PR #65 (canonical reachy-mini dep migration) landed — install-story prereqs simplified; SDK contract test flow moved from `@pytest.mark.sdk` + SSH to the default CI tier for class-level introspection and `@pytest.mark.hardware` + local Mac client for instance-level tests.
+
 **Goal:** Resolve the two open issues that block end-to-end hardware testing of Reachy Ducky on a real Reachy Mini Wireless: hardware audio I/O (#23) and mute coordination across mic + state machine (#20). After this plan merges, a human can plug in the robot, speak, and hear a response — with a functional mute toggle that proves zeroed audio *and* a visible body-sleep posture.
 
 **Architecture:** Two milestones, each a single-PR-sized change. **M1** adds `ReachyMicSource` / `ReachySpeakerSink` hardware implementations (wrapping `ReachyMini.media.*`), pins the SDK audio surface via a contract test, updates the factories to select hardware when a `reachy_mini` handle is passed, and adds an opt-in hardware smoke. **M2** (depends on M1 merged) threads a single `MuteGate` through `EmbodimentStateMachine` *and* the hardware mic source so the MUTED state transition zeros the audio path in addition to putting the body to sleep.
 
 **Tech Stack:**
-- Python 3.12, `uv` workspace with the `robot` optional extra
-- `reachy_mini` SDK — on-robot / Linux only; behind the `robot` extra (broken on macOS)
+- Python 3.12, `uv` workspace
+- `reachy_mini` SDK — plain base dep on `app/pyproject.toml` since PR #65; installs cross-platform (macOS arm64, Linux, Windows) via `uv sync --all-packages --group dev`. The on-robot daemon still runs on the Reachy Mini; Mac / Linux dev machines connect as clients over the LAN (default `reachy-mini.local:8000`).
 - `numpy` — PCM16 frame manipulation
 - `asyncio` — executor off-loads the sync SDK calls so the voice event loop isn't blocked; the wake loop itself is already event-driven (shipped in #15)
-- pytest markers already configured: `sdk` (runs in `sdk-contract.yml`), `hardware` (opt-in, no CI), `integration` (opt-in)
+- pytest markers already configured: `hardware` (opt-in, no CI — needs LAN/USB-connected robot), `integration` (opt-in), `sim` (local-only, needs `reachy-mini-daemon --sim`)
 
 **Issues closed:**
 
@@ -40,30 +42,33 @@
   ```
   Coverage floor **90%** (matches the CI gate).
 - **Marker discipline** (per `.claude/rules/testing-standards.md`):
-  - `@pytest.mark.sdk`: requires `reachy-mini` SDK installed (`uv sync --all-packages --extra robot`). CI runs via `.github/workflows/sdk-contract.yml`.
-  - `@pytest.mark.hardware`: requires a physically-connected Reachy Mini. **Not in CI.** Run with `uv run --extra robot pytest -m hardware`. Tests that cannot import the SDK must `importorskip("reachy_mini")` so a missing extra shows as an honest skip; tests that describe real behaviour never use `@pytest.mark.skip` / `skipif`.
+  - Class-level SDK introspection (e.g. `hasattr(ReachyMini, "play_move")`) runs in the **default unit tier** — `reachy-mini` installs on every dev machine since PR #65, so the main CI workflow (`ci.yml`) catches upstream method renames without a dedicated hardware job.
+  - `@pytest.mark.hardware`: requires a Reachy Mini reachable on the LAN (Wireless) or USB (Lite). **Not in CI.** Run with `uv run pytest -m hardware`. Tests that cannot reach a robot (e.g. `ReachyMini()` constructor raises `ConnectionRefusedError`) should fail with a clear error — they're explicitly opt-in via the marker filter, so a missing robot manifests as an honest failure for the developer who asked for them. Tests that describe real behaviour never use `@pytest.mark.skip` / `skipif`.
   - Unit tests (no marker) stay hardware-free: use `FakeMini` / `FakeMedia` stand-ins.
 - **Side-effect verification** (per `testing-standards.md`): every action-shaped mock (`push_audio_sample`, `get_audio_sample`, `go_to_sleep`, `set_muted`) must be asserted-called. A `MagicMock` without a matching `assert_called*` is a placeholder, not a test.
 
 **Reference skills:** `@superpowers:test-driven-development`, `@superpowers:verification-before-completion`
 
 **Prereqs:**
-- Physical Reachy Mini Wireless (user owns one per memory), OR a Linux host where `uv sync --all-packages --extra robot` installs cleanly.
+- Physical Reachy Mini Wireless reachable on the LAN (user owns one).
 - `gh` authenticated with `repo` scope for PR creation.
-- For M1.1 + M1.5 + M2.3 (on-robot or Linux-host tasks): SSH access to the device OR the `robot` extra installed locally on Linux.
-- Current branch `main` at commit `72bd035` or later (M1–M3 of the prior v0.1.0 testing-prep plan already merged via PR #54). Confirm with `git log --oneline main | head -5`.
+- `uv sync --all-packages --group dev` runs cleanly on your dev machine (macOS arm64, Linux, or Windows). No `--extra robot`; no Linux-host requirement; no SSH into the device for the introspection / contract tasks.
+- Current branch `main` at commit `34d4c36` or later (PR #65 merged — this plan's install-story prereq). Confirm with `git log --oneline main | head -5`.
+- **#64 (`play_move` signature drift) should be fixed before M1's hardware smoke actually touches motion.** Our state-machine mapping uses `str` move names but the SDK expects `Move` objects; unit tests don't exercise it today, but hardware tests will. Tracked separately; fix as its own PR.
 
 **Out of scope (deferred, with rationale):**
 - **Real ONNX wake detection.** `MockWakeDetector` ships today (`wake.py:95-105` comment: *"Task 8.2+ swaps in an ONNX-backed real implementation"*). Manual testing with `MockWakeDetector(trigger_on_feed=True)` **does not exercise a real "hey ducky" path** — it fires on every audio frame, which starves the loop (see `wake.py:65-68`). A separate issue should be filed for real wake once hardware audio is flowing and mock-driven testing proves insufficient. *Not in this plan because it is not an open issue today.*
 - v0.1.0 release plumbing (#28, #29, #30, #24, #26, #47) — ship *after* hardware testing works.
 - **Mac-daemon auto-discovery from the on-robot app (#58)** — today `DAEMON_URL` is set manually in `~/.reachy-ducky/.env`. Fine for the primary developer on their own LAN; a real friction point for community distribution. Explicitly out of scope here so the hardware-testing path doesn't blur with the DX-hardening work.
+- **#64 — `ReachyMotionDriver.play_move` passes `str` but SDK expects `Move` object.** Pre-existing latent bug surfaced by the canonical-dep-migration audit. Unit tests mock the driver so it's invisible today; any hardware test that actually exercises a non-MUTED transition will hit it. **Fix as a separate PR before this plan's M1 hardware smoke runs against a live robot.**
+- #60 (upgrade `reachy-mini` past `>=1.6.4` once migration stabilizes), #61 (remove `[tool.uv] dependency-metadata` gstreamer-msvc patch when upstream fixes its platform marker), #62 (`REACHY_MINI_HOST` env var for hardware tests — drop hardcoded `reachy-mini.local`) — migration-follow-up housekeeping; do not block this plan.
 - #48 Dependabot runtime alerts — parallel investigation; does not block testing.
 - Plan-reviewer polish sweep (#2, #3, #4, #5, #8) — shipped via PR #57; follow-ups tracked in #56.
 - #6 (AppConfig error ergonomics), #19 (BrainRequest.include_tools wire-dead), #22 (project-slug selector) — quality-of-life; not test-blocking.
 - Sim-audio integration (closed `cleanup/sim-tests` branch history + #40) — Pollen's sim stack doesn't expose audio on GitHub-hosted ubuntu-latest today; revisit when upstream lands sim audio.
 
 **Session split:**
-- **Session A** — M1 (SDK investigation + hardware smoke). The SDK audio signature is not yet pinned in our codebase; Task 1.1 resolves that and may drive minor adjustments to later tasks.
+- **Session A** — M1 (SDK investigation + hardware smoke). The SDK audio signature is not yet pinned in our codebase; Task 1.1 resolves that via a local Mac client against the LAN robot and may drive minor adjustments to later tasks.
 - **Session B** — M2 (depends on M1 merged to `main`).
 
 Do **not** try to ship both in one sitting; each milestone warrants its own PR + review cycle.
@@ -81,17 +86,19 @@ Do **not** try to ship both in one sitting; each milestone warrants its own PR +
 **Files:**
 - Create: `app/tests/test_sdk_audio_contract.py`
 
-**Why this task runs first:** The exact SDK method names, signatures, and return shapes drive Tasks 1.2 and 1.3. We cannot write the failing tests for `ReachyMicSource` / `ReachySpeakerSink` without knowing what the SDK actually returns. A contract test doubles as regression protection in the `sdk-contract` CI workflow.
+**Why this task runs first:** The exact SDK method names, signatures, and return shapes drive Tasks 1.2 and 1.3. We cannot write the failing tests for `ReachyMicSource` / `ReachySpeakerSink` without knowing what the SDK actually returns. A contract test doubles as regression protection in the main CI workflow (`ci.yml`) — class-level introspection runs in the default tier now that `reachy-mini` is a plain base dep; instance-level tests gate on `@pytest.mark.hardware`.
 
-**Step 1: Introspect the installed SDK on Linux / the robot**
+**Step 1: Introspect the installed SDK locally**
 
-Run (requires `--extra robot` installed):
+Runs on the Mac against the LAN robot — **not SSH, not Linux-only**. `reachy-mini` is a plain base dep since PR #65, so `ReachyMini()` constructs cross-platform; a `ReachyMini()` with default auto-detection will connect to `reachy-mini.local:8000` on the LAN where our primary robot lives.
 
 ```bash
-uv run --extra robot python <<'EOF'
+uv run python <<'EOF'
 import inspect
 from reachy_mini import ReachyMini
 
+# Connects over the LAN to reachy-mini.local:8000 by default (auto-
+# detect connection_mode). Our primary robot is reachable today.
 mini = ReachyMini()
 media_attrs = sorted(a for a in dir(mini.media) if not a.startswith("_"))
 print("media attrs:", media_attrs)
@@ -114,49 +121,82 @@ Record the actual signatures + dtypes in the PR description. If either method do
 
 **Step 2: Write the failing contract tests**
 
+Two buckets:
+
+1. **Class-level introspection** (no daemon, no media init): runs in the default unit tier — these pass on any machine where `reachy-mini` is installed, which is every dev machine and CI since PR #65.
+2. **Instance-level live-robot tests**: gated on `@pytest.mark.hardware` — require a reachable Reachy Mini.
+
 ```python
 """SDK contract — pin the ReachyMini audio surface used by #23 impls.
 
-Gated on the ``sdk`` marker; runs automatically in
-``.github/workflows/sdk-contract.yml`` with the ``robot`` extra
-installed. Catches upstream audio-API renames / signature changes
-before they hit real hardware.
+Class-level introspection runs in the default unit tier (``reachy-mini``
+installs on every machine since PR #65). Instance-level live-robot
+checks are gated on ``@pytest.mark.hardware`` and run locally via
+``uv run pytest -m hardware`` against a LAN-reachable Reachy Mini —
+they catch upstream audio-API renames / signature changes before they
+hit real hardware.
 """
 
 from __future__ import annotations
 
 import inspect
+
 import numpy as np
 import pytest
 
-pytestmark = pytest.mark.sdk
-
-reachy_mini = pytest.importorskip(
-    "reachy_mini",
-    reason="sdk-tier tests require the reachy-mini SDK (install --extra robot)",
-)
+from reachy_mini import ReachyMini
+from reachy_mini.media.media_manager import MediaManager
 
 
-def test_reachy_mini_media_exposes_audio_sample_methods() -> None:
-    """ReachyMini.media has the two audio methods our impls call."""
-    mini = reachy_mini.ReachyMini()
-    assert hasattr(mini.media, "get_audio_sample"), (
-        "ReachyMini.media.get_audio_sample missing — ReachyMicSource "
-        "can't source frames"
-    )
-    assert hasattr(mini.media, "push_audio_sample"), (
-        "ReachyMini.media.push_audio_sample missing — ReachySpeakerSink "
-        "can't sink frames"
+def test_reachy_mini_media_property_exists() -> None:
+    """``ReachyMini.media`` property is declared at class scope.
+
+    Class-level only — ``media`` is a ``@property`` so the descriptor lives
+    on the class even without instantiation. Proves the access path
+    ``mini.media.<method>`` is still valid without needing a live robot.
+    """
+    assert hasattr(ReachyMini, "media"), (
+        "ReachyMini.media property missing — can't source or sink frames"
     )
 
 
+def test_media_manager_exposes_audio_sample_methods() -> None:
+    """``MediaManager`` class declares the two audio methods our impls call.
+
+    This is the critical default-tier drift guard: ``mini.media`` returns
+    a ``MediaManager`` instance, so renames on ``MediaManager.get_audio_sample`` /
+    ``push_audio_sample`` would silently break our ``ReachyMicSource`` /
+    ``ReachySpeakerSink`` implementations. Introspecting the class directly
+    (not an instance) keeps this in the default tier with no live-robot
+    requirement — catches the rename in CI before it hits hardware.
+    """
+    assert hasattr(MediaManager, "get_audio_sample"), (
+        "MediaManager.get_audio_sample missing — ReachyMicSource can't "
+        "source frames"
+    )
+    assert hasattr(MediaManager, "push_audio_sample"), (
+        "MediaManager.push_audio_sample missing — ReachySpeakerSink can't "
+        "sink frames"
+    )
+    # Also pin the parameterless call shape of get_audio_sample — we
+    # rely on calling it with no arguments. Signature check is class-
+    # level safe (``inspect.signature`` doesn't need an instance).
+    sig = inspect.signature(MediaManager.get_audio_sample)
+    # self is the only parameter; no caller-supplied args.
+    assert len(sig.parameters) == 1, (
+        f"MediaManager.get_audio_sample unexpectedly accepts "
+        f"{list(sig.parameters)}; ReachyMicSource calls it with no args"
+    )
+
+
+@pytest.mark.hardware
 def test_get_audio_sample_returns_non_empty_buffer() -> None:
     """get_audio_sample returns a non-empty PCM buffer.
 
     Exact dtype/shape asserted in the refinement pass after Step 1
     introspection. Today we pin only ``truthy``/``non-empty``.
     """
-    mini = reachy_mini.ReachyMini()
+    mini = ReachyMini()
     sample = mini.media.get_audio_sample()
     assert sample is not None, "get_audio_sample returned None"
     # bytes → len > 0; np.ndarray → size > 0
@@ -164,42 +204,50 @@ def test_get_audio_sample_returns_non_empty_buffer() -> None:
     assert length > 0, f"get_audio_sample returned empty buffer ({sample!r})"
 
 
+@pytest.mark.hardware
 def test_push_audio_sample_accepts_silent_frame() -> None:
     """push_audio_sample accepts a well-formed silent PCM frame."""
-    mini = reachy_mini.ReachyMini()
+    mini = ReachyMini()
     # 40ms @ 24 kHz mono PCM16 = 960 samples = 1920 bytes
     silent = np.zeros(960, dtype=np.int16).tobytes()
     mini.media.push_audio_sample(silent)  # must not raise
 
 
+@pytest.mark.hardware
 def test_get_audio_sample_signature_is_parameterless() -> None:
     """Signature is () → buffer; we rely on calling without arguments."""
-    sig = inspect.signature(reachy_mini.ReachyMini().media.get_audio_sample)
+    sig = inspect.signature(ReachyMini().media.get_audio_sample)
     assert len(sig.parameters) == 0, (
         f"get_audio_sample unexpectedly accepts {list(sig.parameters)}; "
         "ReachyMicSource calls it with no arguments"
     )
 ```
 
-**Step 3: Run the failing tests on the robot / Linux host**
+**Step 3: Run the failing tests locally against the LAN robot**
 
 ```bash
-uv run --extra robot pytest -m sdk app/tests/test_sdk_audio_contract.py -v
+uv run pytest app/tests/test_sdk_audio_contract.py -v                 # class-level (default tier)
+uv run pytest -m hardware app/tests/test_sdk_audio_contract.py -v     # instance-level (live robot)
 ```
 
-Expected on a machine with `--extra robot` NOT installed: `SKIPPED` (4 tests) with the "install --extra robot" reason. Expected on a machine *with* the extra: one of four outcomes:
-1. All 4 pass — pin the contract as-is, move on.
+Expected on any dev machine:
+- **First command** (default tier): both class-level tests pass — they introspect `ReachyMini`'s `media` property and `MediaManager`'s audio-method class surface. No daemon, no live robot, catches upstream renames in CI.
+- **Second command** (`-m hardware`): collects the four hardware-marked tests in the module. Without a reachable Reachy Mini they fail at `ReachyMini()` construction (typically `ConnectionRefusedError`) — that's the documented "honest failure" policy from `testing-standards.md`. Re-run on a machine that can reach the LAN robot (or skip manually until hardware is available).
+
+Expected on a machine with a reachable Reachy Mini: one of four outcomes for the hardware-marked tests:
+1. All pass — pin the contract as-is, move on.
 2. `hasattr` fails — SDK method renamed. **Escalate** (see Step 1).
 3. Buffer assertion fails — SDK returns `None` or empty. Check if the mic needs initialization first; update the test to call whatever initialization is required.
 4. Signature assertion fails — method takes args we don't know about. Update the test to match reality; ensure Task 1.2's `ReachyMicSource.frames()` supplies them.
 
 **Step 4: Refine based on Step 3 output**
 
-Once the test actually runs against the SDK, tighten the dtype/size assertions to the exact shape observed. Example refinement if `get_audio_sample` returns `np.ndarray[int16]` with 480 samples:
+Once the test actually runs against the SDK, tighten the dtype/size assertions to the exact shape observed. Example refinement if `get_audio_sample` returns `np.ndarray[int16]` with 480 samples (this is a `@pytest.mark.hardware` test — add the marker at module or per-function scope):
 
 ```python
+@pytest.mark.hardware
 def test_get_audio_sample_returns_int16_ndarray_at_24khz() -> None:
-    mini = reachy_mini.ReachyMini()
+    mini = ReachyMini()
     sample = mini.media.get_audio_sample()
     assert isinstance(sample, np.ndarray), f"expected ndarray, got {type(sample)}"
     assert sample.dtype == np.int16, f"expected int16, got {sample.dtype}"
@@ -212,11 +260,12 @@ def test_get_audio_sample_returns_int16_ndarray_at_24khz() -> None:
 ```bash
 git add app/tests/test_sdk_audio_contract.py
 git commit -m "$(cat <<'EOF'
-test(sdk): pin ReachyMini audio surface used by #23 impls
+test: pin ReachyMini audio surface used by #23 impls
 
-Runs in the sdk-contract CI workflow (robot extra installed) and catches
-upstream audio-API renames / signature changes before they hit real
-hardware. Complements the existing @pytest.mark.sdk suite pinning the
+Class-level introspection runs in the default CI tier; instance-level
+live-robot checks gate on @pytest.mark.hardware. Catches upstream
+audio-API renames / signature changes before they hit real hardware.
+Complements the existing class-surface contract tests pinning the
 motion/lifecycle surface.
 
 Refinement of dtype/size asserts based on Step 1 introspection results
@@ -313,7 +362,8 @@ class ReachyMicSource(MicSource):
     Wraps ``ReachyMini.media.get_audio_sample()`` in an async generator.
     The SDK call is synchronous and runs on an executor so the voice
     event loop isn't blocked. Format contract (PCM16 mono 24 kHz) is
-    pinned by the sdk-contract test (:mod:`test_sdk_audio_contract`);
+    pinned by :mod:`test_sdk_audio_contract` (class-level checks in the
+    default tier; instance-level checks under ``@pytest.mark.hardware``);
     this class does NOT resample — if a future SDK version returns a
     different rate, the contract test fails first.
 
@@ -356,8 +406,8 @@ feat(app/voice): ReachyMicSource wraps mini.media.get_audio_sample
 
 Hardware-backed MicSource for #23. Synchronous SDK call is dispatched to
 an executor so the voice loop stays unblocked. Terminates on empty-
-buffer sentinel. Format contract (PCM16 mono 24 kHz) pinned by the
-sdk-contract test.
+buffer sentinel. Format contract (PCM16 mono 24 kHz) pinned by
+test_sdk_audio_contract.
 
 Refs #23.
 EOF
@@ -415,7 +465,7 @@ class ReachySpeakerSink(SpeakerSink):
     Wraps ``ReachyMini.media.push_audio_sample()``. Symmetric with
     :class:`ReachyMicSource`: synchronous SDK call is dispatched to an
     executor, format contract is PCM16 mono 24 kHz (pinned by
-    sdk-contract test).
+    :mod:`test_sdk_audio_contract`).
     """
 
     def __init__(self, reachy_mini: object) -> None:
@@ -616,7 +666,8 @@ EOF
 """Hardware smoke for the #23 audio-I/O plumbing.
 
 Gated on ``@pytest.mark.hardware`` — runs only with a real Reachy Mini
-attached. Invoke with ``uv run --extra robot pytest -m hardware``.
+reachable on the LAN (or USB for Lite). Invoke locally with
+``uv run pytest -m hardware``.
 
 Verifies end-to-end that PCM frames flow through the real SDK and come
 out the speaker without the process crashing. Does NOT assert audio
@@ -631,32 +682,29 @@ import asyncio
 import numpy as np
 import pytest
 
-pytestmark = pytest.mark.hardware
+from reachy_mini import ReachyMini
 
-reachy_mini = pytest.importorskip(
-    "reachy_mini",
-    reason="hardware tests require the reachy-mini SDK (install --extra robot)",
-)
+pytestmark = pytest.mark.hardware
 
 
 @pytest.mark.asyncio
 async def test_reachy_speaker_sink_plays_silent_frame_without_error() -> None:
     from reachy_ducky_app.voice.audio_io import ReachySpeakerSink
 
-    mini = reachy_mini.ReachyMini()
+    mini = ReachyMini()
     sink = ReachySpeakerSink(mini)
     silent = np.zeros(960, dtype=np.int16).tobytes()  # 40ms @ 24 kHz mono
     await sink.play(silent)
     # Human-in-the-loop: listener confirms audible silence (no static /
     # garbage). If this call raises, the SDK rejected the frame shape;
-    # re-check the sdk-contract test pins.
+    # re-check the test_sdk_audio_contract pins.
 
 
 @pytest.mark.asyncio
 async def test_reachy_mic_source_yields_at_least_one_frame() -> None:
     from reachy_ducky_app.voice.audio_io import ReachyMicSource
 
-    mini = reachy_mini.ReachyMini()
+    mini = ReachyMini()
     src = ReachyMicSource(mini)
 
     async def pull_one() -> bytes | None:
@@ -672,10 +720,10 @@ async def test_reachy_mic_source_yields_at_least_one_frame() -> None:
 **Step 2: Run on hardware**
 
 ```bash
-uv run --extra robot pytest -m hardware app/tests/voice/test_audio_io_hardware.py -v
+uv run pytest -m hardware app/tests/voice/test_audio_io_hardware.py -v
 ```
 
-Expected on a connected Reachy Mini: 2 passed. On a dev machine without the `robot` extra: 2 skipped with the `importorskip` reason. **Do not** convert these to `pytest.skip(...)` inside the test body — `importorskip` is the one sanctioned path per `testing-standards.md`.
+Expected on a connected Reachy Mini: 2 passed. On a dev machine with no reachable robot: the `ReachyMini()` constructor will raise (e.g. `ConnectionRefusedError`) and the tests will fail with a clear error — that's the honest-failure contract per `testing-standards.md`. These tests are explicitly opt-in via the marker filter, so `-m hardware` is the only path that invokes them.
 
 **Step 3: Commit**
 
@@ -702,13 +750,12 @@ gh pr create --title "feat(app): hardware audio I/O (closes #23)" --body "$(cat 
 ## Summary
 - Adds `ReachyMicSource` / `ReachySpeakerSink` wrapping `ReachyMini.media.get_audio_sample` / `push_audio_sample`.
 - Factories select hardware impls when `reachy_mini` is passed; mocks otherwise.
-- SDK contract test pins the audio surface in the `sdk-contract` CI workflow.
+- SDK contract test pins the audio surface: class-level checks in the default CI tier; instance-level checks under `@pytest.mark.hardware`.
 - Hardware smoke test (`@pytest.mark.hardware`) validates end-to-end on a real robot.
 
 ## Test plan
-- [ ] `uv run pytest -q` — unit suite, all green, coverage ≥ 90%.
-- [ ] `uv run --extra robot pytest -m sdk` — SDK contract tests pass on Linux.
-- [ ] `uv run --extra robot pytest -m hardware` — hardware smoke passes on the Reachy Mini (physical confirmation: silent frame audible silence; mic frame non-empty).
+- [ ] `uv run pytest -q` — unit suite, all green, coverage ≥ 90% (includes the class-level contract checks).
+- [ ] `uv run pytest -m hardware` — hardware smoke + instance-level contract tests pass on the Reachy Mini (physical confirmation: silent frame audible silence; mic frame non-empty).
 - [ ] Closes #23 when merged.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
@@ -1167,9 +1214,10 @@ EOF
 ```python
 """Hardware smoke for the #20 mute-coordination seam.
 
-Gated on ``@pytest.mark.hardware``. Constructs the real app graph
-(without running the conversation loop) and verifies that transitioning
-the state machine to MUTED zeros the live mic source *and* calls
+Gated on ``@pytest.mark.hardware``. Runs locally on the Mac against a
+LAN-reachable Reachy Mini. Constructs the real app graph (without
+running the conversation loop) and verifies that transitioning the
+state machine to MUTED zeros the live mic source *and* calls
 go_to_sleep on the body. Complements the unit-level coverage in
 test_audio_io.py and test_state_machine.py.
 """
@@ -1181,14 +1229,11 @@ import asyncio
 import numpy as np
 import pytest
 
+from reachy_mini import ReachyMini
+
 from reachy_ducky_protocol.messages import State
 
 pytestmark = pytest.mark.hardware
-
-reachy_mini = pytest.importorskip(
-    "reachy_mini",
-    reason="hardware tests require the reachy-mini SDK (install --extra robot)",
-)
 
 
 @pytest.mark.asyncio
@@ -1198,7 +1243,7 @@ async def test_muted_transition_zeros_live_mic_and_sleeps_body() -> None:
     from reachy_ducky_app.mute import MuteGate
     from reachy_ducky_app.voice.audio_io import load_default_mic_source
 
-    mini = reachy_mini.ReachyMini()
+    mini = ReachyMini()
     driver = ReachyMotionDriver(mini)
     gate = MuteGate()
     sm = EmbodimentStateMachine(driver=driver, mute_gate=gate)
@@ -1227,10 +1272,10 @@ async def test_muted_transition_zeros_live_mic_and_sleeps_body() -> None:
 **Step 2: Run on hardware**
 
 ```bash
-uv run --extra robot pytest -m hardware app/tests/test_main_hardware.py -v
+uv run pytest -m hardware app/tests/test_main_hardware.py -v
 ```
 
-Expected: 1 passed on a connected Reachy Mini. Human confirms visually that the body goes to sleep and wakes up during the test.
+Expected: 1 passed on a connected Reachy Mini. Human confirms visually that the body goes to sleep and wakes up during the test. **Note:** this test exercises `ReachyMotionDriver.play_move` via the MUTED→IDLE transition — #64 (`play_move` signature drift) must be fixed first or the `IDLE` leg will fail.
 
 **Step 3: Commit + push + open PR**
 
@@ -1256,11 +1301,11 @@ gh pr create --title "feat(app): mute coordination across sm + mic (closes #20)"
 
 ## Test plan
 - [ ] `uv run pytest -q` — unit suite, all green, coverage ≥ 90%.
-- [ ] `uv run --extra robot pytest -m hardware` — hardware smoke passes (human confirms body sleep / wake transitions).
+- [ ] `uv run pytest -m hardware` — hardware smoke passes (human confirms body sleep / wake transitions).
 - [ ] Manual end-to-end: speak into the mic → transcript → reply audible. Then mute → robot sleeps and transcripts stop. Unmute → robot wakes and transcripts resume.
 - [ ] Closes #20 when merged.
 
-Depends on #23 (hardware audio I/O) — already merged.
+Depends on #23 (hardware audio I/O) — already merged. Also requires #64 (`play_move` signature drift) resolved before the IDLE leg of the MUTED→IDLE transition touches real hardware.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
@@ -1284,11 +1329,11 @@ When both milestone PRs are merged:
 
 2. **Hardware smokes pass on the robot:**
    ```bash
-   uv run --extra robot pytest -m hardware -v
+   uv run pytest -m hardware -v
    ```
-   Expected: 3 passed (2 from #23 — speaker silent frame, mic one frame; 1 from #20 — MUTED zeros live mic + sleeps body).
+   Expected: the Task 1.1 instance-level contract tests + 2 from #23 (speaker silent frame, mic one frame) + 1 from #20 (MUTED zeros live mic + sleeps body) all pass. Requires #64 (`play_move` signature drift) already fixed so the MUTED→IDLE leg doesn't fail at the motion call.
 
-3. **SDK contract CI workflow stays green** on every PR (`sdk-contract.yml`).
+3. **Default CI tier stays green** on every PR (`ci.yml`) — including the class-level SDK contract checks added in Task 1.1.
 
 4. **Issue audit:** #20, #23 both closed by their respective PRs' merge commits.
 
@@ -1316,5 +1361,5 @@ When the walkthrough passes, **Reachy Ducky is ready for ongoing testing**. Any 
 
 - **Task 1.1 — unexpected SDK shape.** If `get_audio_sample` returns `np.ndarray` instead of `bytes`, `ReachyMicSource.frames()` needs `frame.tobytes()` before yielding. This is a small adapter, not a design change — but it changes the Task 1.2 test payloads. Escalate only if the method name / call signature differs.
 - **Task 1.2 / 1.3 — sync vs async SDK methods.** The plan assumes synchronous methods dispatched via `run_in_executor`. If either method is already `async`, drop the executor and `await` directly. Not a scope change.
-- **Task 2.2 — PCM format drift.** `MuteGate.process` operates on `np.int16` arrays; the mic path operates on `bytes`. The in-task conversion (`np.frombuffer → zeros_like → tobytes`) keeps `MuteGate`'s typed contract intact. If the SDK returns non-PCM16 bytes, the sdk-contract test from Task 1.1 will catch it and this plan's mute zeroing becomes nonsensical — escalate.
+- **Task 2.2 — PCM format drift.** `MuteGate.process` operates on `np.int16` arrays; the mic path operates on `bytes`. The in-task conversion (`np.frombuffer → zeros_like → tobytes`) keeps `MuteGate`'s typed contract intact. If the SDK returns non-PCM16 bytes, the Task 1.1 contract tests (instance-level hardware checks) will catch it and this plan's mute zeroing becomes nonsensical — escalate.
 - **Task 2.3 — hardware access needed.** Without a physical Reachy Mini, 2.3 cannot run. The unit-level coverage (tests added in 2.1 + 2.2) is strong enough to merge `mute-coordination` with 2.3 marked as a follow-up verification step. Do not skip 2.3 permanently — it is the only test that proves the wiring works on real audio hardware.
