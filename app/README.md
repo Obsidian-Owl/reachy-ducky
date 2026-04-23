@@ -1,3 +1,21 @@
+---
+# HF Space presentation chrome ONLY — fields HuggingFace Spaces reads
+# that do NOT appear in reachy_mini_app.yaml. Shared fields (title,
+# emoji, app_class, python_version, description) live in the YAML
+# (canonical for the on-robot Pollen dashboard); this frontmatter
+# carries only HF-Space-listing metadata that has no other consumer,
+# so drift is impossible by construction (a field can't drift if it
+# exists in only one place). See closed issue #16.
+colorFrom: yellow
+colorTo: blue
+sdk: static
+pinned: false
+short_description: Read-only rubber-ducky companion for agentic SWE work.
+tags:
+  - reachy_mini
+  - reachy_mini_python_app
+---
+
 # Reachy Ducky — Reachy Mini App
 
 The Reachy Mini side of the [Reachy Ducky project](https://github.com/Obsidian-Owl/reachy-ducky).
