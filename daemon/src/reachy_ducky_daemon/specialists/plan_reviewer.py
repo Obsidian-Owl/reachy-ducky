@@ -43,16 +43,7 @@ from pathlib import Path
 from reachy_ducky_protocol.messages import BrainRequest, SpecialistResponse
 
 from reachy_ducky_daemon.brain.interface import BrainInterface
-
-# Reuse the module-private plan-discovery helper from plans_mcp. Importing
-# by its underscore name across modules is unconventional but here it's
-# deliberate: promoting ``_list_plans`` to a public ``list_plans`` would
-# require touching every existing test import, and duplicating the logic
-# would create a drift surface between specialist and MCP tool.
-# TODO(#4): promote `_list_plans` to public `list_plans` before the 2nd
-# Phase A specialist lands, so this cross-subpackage private import doesn't
-# become precedent.
-from reachy_ducky_daemon.brain.plans_mcp import _list_plans
+from reachy_ducky_daemon.brain.plans_mcp import list_plans
 from reachy_ducky_daemon.specialists.redaction import RedactionError, redact
 
 __all__ = ["PlanReviewer"]
@@ -114,11 +105,15 @@ def _capture_diff(repo: Path, branch: str) -> tuple[str, str | None]:
 
     Both paths are ``check=False``; a git failure becomes a diagnostic
     string in the returned ``error`` rather than a raised exception.
+
+    When the merge-base diff fails and the working-tree fallback
+    produces output, the returned ``diff_text`` is prefixed with a
+    one-line ``(fallback: ...)`` banner so the brain can distinguish a
+    deliberate on-main working-tree diff from a degraded feature-branch
+    one. The banner is omitted on the on-main path (``fallback_err`` is
+    ``None`` there — no merge-base was attempted) and on empty-stdout
+    fallbacks.
     """
-    # TODO(#3): add test coverage for the merge-base-failure fallback branch
-    # below (feature branch + `main` ref absent). Also prepend a "using
-    # working-tree-vs-HEAD fallback" banner to the returned diff text when
-    # this path engages so the brain can distinguish fallback from primary.
     if branch != "main":
         try:
             proc = _run_git(["diff", "main...HEAD"], cwd=repo)
@@ -142,39 +137,152 @@ def _capture_diff(repo: Path, branch: str) -> tuple[str, str | None]:
         if fallback_err is not None:
             return "", f"{fallback_err}; git diff (fallback) failed: {combined}"
         return "", f"git diff failed: {combined}"
+    # Prepend a banner when we actually fell back from a merge-base diff
+    # (i.e., not the on-main path where fallback_err is None because there
+    # was no merge-base attempt in the first place). Lets the brain tell
+    # 'working-tree diff because on main' from 'working-tree diff because
+    # main ref is absent / merge-base failed'.
+    if fallback_err is not None and fallback.stdout:
+        # Uses ``(fallback: ...)`` rather than the ``(diagnostic: ...)`` pattern
+        # used by _current_branch and _collect_plans error surfaces — this is a
+        # mode switch ("we changed strategy"), not an error diagnostic.
+        banner = (
+            "(fallback: using working-tree-vs-HEAD diff; merge-base against main was unavailable)\n"
+        )
+        return banner + fallback.stdout, fallback_err
     return fallback.stdout, fallback_err
 
 
-def _collect_plans(repo: Path) -> list[tuple[str, str]]:
-    """Return ``[(relative_path, contents)]`` for every plan file under ``repo``.
+def _truncate_plan_body(body: str, max_chars: int) -> str:
+    """Truncate ``body`` to ``max_chars`` with an inline marker if cut.
 
-    Files whose ``read_text`` raises (non-UTF-8, vanished between the
-    ``_list_plans`` walk and the read, permission denied, etc.) are
-    skipped silently — the assembled prompt already includes the file's
-    path via neighbouring plan files or via the missing-plans
-    diagnostic, and bubbling the error up would defeat the "no
-    exceptions escape to callers" design constraint.
+    Returns ``body`` unchanged when it fits; otherwise returns
+    ``body[:max_chars] + "\\n[... truncated: N chars elided ...]\\n"``
+    where N is the dropped char count.
     """
-    # TODO(#5): instead of silently skipping, accumulate (rel, error_string)
-    # entries and surface them under an "=== UNREADABLE PLANS ===" prompt
-    # header. Current silent skip is asymmetric with `_capture_diff` and
-    # `_current_branch` (both surface errors as diagnostics).
-    out: list[tuple[str, str]] = []
-    for rel in _list_plans(repo):
+    if len(body) <= max_chars:
+        return body
+    elided = len(body) - max_chars
+    return body[:max_chars] + f"\n[... truncated: {elided} chars elided ...]\n"
+
+
+def _collect_plans(
+    repo: Path,
+    max_chars_per_plan: int,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Return ``(readable, unreadable)``.
+
+    ``readable`` is ``[(rel, content)]`` for every plan that loaded
+    cleanly. ``unreadable`` is ``[(rel, error_string)]`` for every plan
+    ``list_plans`` advertised but ``read_text`` rejected (non-UTF-8,
+    permission-denied, vanished mid-walk, etc.). Both lists are sorted
+    by ``rel``; either may be empty. Mirrors the error-surface pattern
+    used by ``_current_branch`` and ``_capture_diff`` — the diagnostic
+    surfaces to the brain via the ``=== UNREADABLE PLANS ===`` prompt
+    section in ``_assemble_prompt`` rather than being silently swallowed.
+
+    ``max_chars_per_plan`` caps each individual readable body via
+    :func:`_truncate_plan_body`; oversize bodies are cut with a visible
+    inline marker so the brain knows truncation occurred. The cap is
+    applied after the successful read, before appending to ``readable``.
+    """
+    readable: list[tuple[str, str]] = []
+    unreadable: list[tuple[str, str]] = []
+    for rel in list_plans(repo):
         try:
             content = (repo / rel).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        except OSError as exc:
+            # exc.strerror omits the absolute filename that str(exc) embeds —
+            # avoids leaking client-project paths / usernames into the prompt
+            # that flows to Claude. The relative path is already in the section
+            # header at _assemble_prompt's '--- {rel} ---' line, so the brain
+            # has the context it needs. (Code-review I1 follow-up to #5.)
+            detail = exc.strerror or str(exc)
+            unreadable.append((rel, f"OSError: {detail}"))
             continue
-        out.append((rel, content))
-    return out
+        except UnicodeDecodeError as exc:
+            # UnicodeDecodeError.__str__ doesn't embed a path; safe as-is.
+            unreadable.append((rel, f"UnicodeDecodeError: {exc}"))
+            continue
+        readable.append((rel, _truncate_plan_body(content, max_chars_per_plan)))
+    return readable, unreadable
+
+
+def _assemble_plans_block(
+    plans: list[tuple[str, str]],
+    max_total_chars: int,
+    *,
+    has_unreadable: bool = False,
+) -> list[str]:
+    """Build the ``=== PLANS ===`` section under a total-char budget.
+
+    Concatenates plan blocks (``--- rel ---`` header + body + trailing
+    separator) in order; once the cumulative block length would exceed
+    ``max_total_chars`` (after at least one plan has landed), appends a
+    single ``[... N plan(s) omitted ...]`` marker (``plan`` / ``plans``
+    grammatically matched to ``N``) and stops. The ``(no plans)``
+    branch is unchanged.
+
+    The budget measures the rendered block — header + body + separator
+    — so the char count matches what actually flows into the prompt,
+    not just the plan body. This is a small (~40 chars per plan)
+    overhead but honest about what consumes the brain's context.
+
+    The "at least one plan included" guard means a single oversized
+    plan (longer than the total budget) still lands — so the brain
+    always gets at least one plan when any exist. Per-file truncation
+    in :func:`_collect_plans` bounds the damage in that edge case.
+
+    ``has_unreadable``: when True AND ``plans`` is empty, emits a
+    message that points to the UNREADABLE PLANS section rather than
+    claiming nothing was discovered — the caller has detected that
+    plans exist but all failed to read.
+    """
+    parts: list[str] = ["=== PLANS ==="]
+    if not plans:
+        if has_unreadable:
+            parts.append(
+                "(no readable plan or spec files — see UNREADABLE PLANS below)",
+            )
+        else:
+            parts.append(
+                "(no plan or spec files discovered under conventional locations — "
+                "docs/plans/**/*.md, specs/**/*.md, root AGENTS.md/CLAUDE.md/SPEC.md, "
+                "*.plan.md)",
+            )
+        return parts
+
+    used = 0
+    included = 0
+    for rel, body in plans:
+        body_clean = body.rstrip("\n")
+        block = f"--- {rel} ---\n{body_clean}\n"
+        # Guarantee at least one plan lands even if it exceeds the budget alone —
+        # per-file truncation in _collect_plans bounds that worst case.
+        if used + len(block) > max_total_chars and included > 0:
+            remaining = len(plans) - included
+            plan_word = "plan" if remaining == 1 else "plans"
+            parts.append(
+                f"[... {remaining} {plan_word} omitted: total plans-block "
+                f"budget of {max_total_chars} chars exhausted ...]",
+            )
+            break
+        parts.append(block.rstrip("\n"))
+        parts.append("")
+        used += len(block)
+        included += 1
+    return parts
 
 
 def _assemble_prompt(
     branch: str,
     branch_error: str | None,
     plans: list[tuple[str, str]],
+    unreadable_plans: list[tuple[str, str]],
     diff: str,
     diff_error: str | None,
+    *,
+    max_total_chars: int,
 ) -> str:
     """Build the final single-string prompt the brain receives.
 
@@ -183,10 +291,18 @@ def _assemble_prompt(
     between the plan block and the diff block. The directive goes last
     so it sits closest to where the model starts generating.
 
-    TODO(#2): add per-file and total byte caps with a truncation marker.
-    Repos with many large plans risk silent context-window overflow at
-    the SDK layer; a marked in-prompt truncation is better than opaque
-    SDK-level cutoff.
+    When ``unreadable_plans`` is non-empty, a dedicated
+    ``=== UNREADABLE PLANS ===`` section sits between ``=== PLANS ===``
+    and ``=== DIFF ===`` so the brain can tell "file listed but
+    unreadable" from "file never existed". The section is omitted when
+    every plan loads cleanly to avoid cluttering the common case.
+
+    ``max_total_chars`` caps the cumulative body length across all
+    plans; once exhausted, remaining plans are replaced by a single
+    ``[... N plan(s) omitted ...]`` marker (see
+    :func:`_assemble_plans_block`). Visible in-prompt truncation is
+    better than silent SDK-layer cutoff when Claude's context window
+    would be blown by the concatenated plan bodies.
     """
     parts: list[str] = []
     parts.append(f"Branch: {branch}")
@@ -194,19 +310,26 @@ def _assemble_prompt(
         parts.append(f"(diagnostic: {branch_error})")
     parts.append("")
 
-    parts.append("=== PLANS ===")
-    if not plans:
-        parts.append(
-            "(no plan or spec files discovered under conventional locations — "
-            "docs/plans/**/*.md, specs/**/*.md, root AGENTS.md/CLAUDE.md/SPEC.md, "
-            "*.plan.md)",
-        )
-    else:
-        for rel, content in plans:
-            parts.append(f"--- {rel} ---")
-            parts.append(content.rstrip("\n"))
-            parts.append("")
+    parts.extend(
+        _assemble_plans_block(
+            plans,
+            max_total_chars,
+            has_unreadable=bool(unreadable_plans),
+        ),
+    )
     parts.append("")
+
+    if unreadable_plans:
+        parts.append("=== UNREADABLE PLANS ===")
+        parts.append(
+            "(These files were discovered under conventional locations but "
+            "could not be read. Listed here so you can note them in the "
+            "review — they do not participate in drift analysis.)",
+        )
+        for rel, err in unreadable_plans:
+            parts.append(f"--- {rel} ---")
+            parts.append(f"(diagnostic: {err})")
+        parts.append("")
 
     parts.append("=== DIFF ===")
     if diff_error is not None:
@@ -225,15 +348,50 @@ def _assemble_prompt(
 class PlanReviewer:
     """Hybrid specialist: pre-load plans + diff, then query the brain."""
 
-    def __init__(self, brain: BrainInterface, repo: Path) -> None:
+    def __init__(
+        self,
+        brain: BrainInterface,
+        repo: Path,
+        *,
+        max_plan_chars: int = 50_000,
+        max_total_plan_chars: int = 200_000,
+    ) -> None:
         """Bind the specialist to a brain and a repo root.
 
         ``repo`` is expected to be a checked-out git working tree. The
         specialist treats it as a read-only boundary — no command
         issued from here can mutate its state.
+
+        ``max_plan_chars`` (default 50,000) caps each individual plan's
+        body length in the assembled prompt. Bodies over the cap are
+        truncated with an inline ``[... truncated: N chars elided ...]``
+        marker. Calibrated to typical plan sizes in this repo (the
+        Phase A plan is ~3,000 lines / ~140KB); raise via constructor
+        for a repo with much larger plans.
+
+        ``max_total_plan_chars`` (default 200,000) caps the cumulative
+        body length across all plans. Once the budget is exhausted,
+        the remaining plans are replaced by a single
+        ``[... N plan(s) omitted ...]`` marker. Calibrated against
+        Claude's 200k-token context — chars × ~4-bytes-per-token leaves
+        headroom for the diff, the brain's response, and other sections.
+
+        Intended invariant: ``max_plan_chars <= max_total_plan_chars``.
+        This is not enforced at construction (individual reviewers may
+        deliberately tune one cap above the other), but worst-case
+        overshoot of the total budget is bounded at
+        ``max_total_plan_chars + max_plan_chars`` because the per-file
+        truncation in :func:`_collect_plans` caps any single plan's
+        contribution before it reaches the total-budget check in
+        :func:`_assemble_plans_block`.
+
+        Both caps are keyword-only so a future signature evolution can
+        add positional kwargs without ambiguity. (#2)
         """
         self._brain = brain
         self._repo = repo
+        self._max_plan_chars = max_plan_chars
+        self._max_total_plan_chars = max_total_plan_chars
 
     async def review(self) -> SpecialistResponse:
         """Assemble the review prompt, redact secrets, dispatch to the brain.
@@ -244,15 +402,20 @@ class PlanReviewer:
         secret leaks.
         """
         branch, branch_error = _current_branch(self._repo)
-        plans = _collect_plans(self._repo)
+        plans, unreadable_plans = _collect_plans(
+            self._repo,
+            max_chars_per_plan=self._max_plan_chars,
+        )
         diff, diff_error = _capture_diff(self._repo, branch)
 
         prompt = _assemble_prompt(
             branch=branch,
             branch_error=branch_error,
             plans=plans,
+            unreadable_plans=unreadable_plans,
             diff=diff,
             diff_error=diff_error,
+            max_total_chars=self._max_total_plan_chars,
         )
 
         try:

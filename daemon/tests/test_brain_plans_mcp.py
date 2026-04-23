@@ -1,6 +1,6 @@
 """Unit tests for the in-process plans MCP server.
 
-Exercises the pure helpers (``_list_plans``, ``_read_plan``) directly so the
+Exercises the pure helpers (``list_plans``, ``_read_plan``) directly so the
 security properties are locked in without going through the SDK layer, plus a
 hello-world integration assertion that the @tool-decorated wrappers are wired
 through ``create_sdk_mcp_server`` with the right names/descriptions.
@@ -14,9 +14,9 @@ from typing import Any
 import pytest
 from reachy_ducky_daemon.brain.plans_mcp import (
     _CONVENTIONAL_PATTERNS,
-    _list_plans,
     _make_plans_tools,
     _read_plan,
+    list_plans,
     plans_mcp_server,
 )
 
@@ -37,13 +37,13 @@ def _require_dict_schema(schema: Any, *, tool_name: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# _list_plans
+# list_plans
 # ---------------------------------------------------------------------------
 
 
 def test_list_plans_empty_project(tmp_path: Path) -> None:
     """An empty project tree returns an empty list."""
-    assert _list_plans(tmp_path) == []
+    assert list_plans(tmp_path) == []
 
 
 def test_list_plans_single_docs_plan(tmp_path: Path) -> None:
@@ -52,7 +52,7 @@ def test_list_plans_single_docs_plan(tmp_path: Path) -> None:
     plan.parent.mkdir(parents=True)
     plan.write_text("# foo")
 
-    assert _list_plans(tmp_path) == ["docs/plans/foo.md"]
+    assert list_plans(tmp_path) == ["docs/plans/foo.md"]
 
 
 def test_list_plans_nested_docs_plans(tmp_path: Path) -> None:
@@ -60,7 +60,7 @@ def test_list_plans_nested_docs_plans(tmp_path: Path) -> None:
     (tmp_path / "docs" / "plans" / "sub").mkdir(parents=True)
     (tmp_path / "docs" / "plans" / "sub" / "deep.md").write_text("deep")
 
-    assert _list_plans(tmp_path) == ["docs/plans/sub/deep.md"]
+    assert list_plans(tmp_path) == ["docs/plans/sub/deep.md"]
 
 
 def test_list_plans_multiple_locations_sorted_dedup(tmp_path: Path) -> None:
@@ -76,7 +76,7 @@ def test_list_plans_multiple_locations_sorted_dedup(tmp_path: Path) -> None:
     (tmp_path / "SPEC.md").write_text("root spec")
     (tmp_path / "bravo.plan.md").write_text("bravo plan")
 
-    result = _list_plans(tmp_path)
+    result = list_plans(tmp_path)
 
     assert result == sorted(result), "results must be sorted lexicographically"
     assert len(result) == len(set(result)), "results must be deduplicated"
@@ -95,7 +95,7 @@ def test_list_plans_readme_excluded(tmp_path: Path) -> None:
     """README.md at the root is not a conventional plan and is not returned."""
     (tmp_path / "README.md").write_text("readme")
 
-    assert _list_plans(tmp_path) == []
+    assert list_plans(tmp_path) == []
 
 
 def test_list_plans_daemon_src_excluded(tmp_path: Path) -> None:
@@ -103,7 +103,7 @@ def test_list_plans_daemon_src_excluded(tmp_path: Path) -> None:
     (tmp_path / "daemon" / "src").mkdir(parents=True)
     (tmp_path / "daemon" / "src" / "foo.md").write_text("arbitrary md")
 
-    assert _list_plans(tmp_path) == []
+    assert list_plans(tmp_path) == []
 
 
 def test_list_plans_excludes_directories(tmp_path: Path) -> None:
@@ -111,14 +111,14 @@ def test_list_plans_excludes_directories(tmp_path: Path) -> None:
     target = tmp_path / "docs" / "plans" / "sub.md"
     target.mkdir(parents=True)
 
-    assert _list_plans(tmp_path) == []
+    assert list_plans(tmp_path) == []
 
 
 def test_list_plans_dot_plan_md_at_root(tmp_path: Path) -> None:
     """``*.plan.md`` files at the root are returned."""
     (tmp_path / "foo.plan.md").write_text("foo plan")
 
-    assert _list_plans(tmp_path) == ["foo.plan.md"]
+    assert list_plans(tmp_path) == ["foo.plan.md"]
 
 
 def test_list_plans_root_name_non_plan_md_excluded(tmp_path: Path) -> None:
@@ -127,7 +127,7 @@ def test_list_plans_root_name_non_plan_md_excluded(tmp_path: Path) -> None:
     (tmp_path / "NOTES.md").write_text("notes")
     (tmp_path / "CHANGELOG.md").write_text("cl")
 
-    assert _list_plans(tmp_path) == []
+    assert list_plans(tmp_path) == []
 
 
 def test_list_plans_dedup_when_file_matches_multiple_patterns(tmp_path: Path) -> None:
@@ -135,12 +135,12 @@ def test_list_plans_dedup_when_file_matches_multiple_patterns(tmp_path: Path) ->
 
     ``foo.plan.md`` living under ``docs/plans/`` matches both ``docs/plans/**/*.md``
     and ``*.plan.md``-style checks (depending on cwd); the ``set``-based dedup
-    inside ``_list_plans`` must guarantee one entry.
+    inside ``list_plans`` must guarantee one entry.
     """
     (tmp_path / "docs" / "plans").mkdir(parents=True)
     (tmp_path / "docs" / "plans" / "foo.plan.md").write_text("x")
 
-    result = _list_plans(tmp_path)
+    result = list_plans(tmp_path)
 
     assert result.count("docs/plans/foo.plan.md") == 1
 
@@ -306,7 +306,7 @@ def test_read_plan_symlink_to_file_inside_project_allowed(tmp_path: Path) -> Non
 
 
 def test_read_plan_deep_docs_plans_path_matches_discover_surface(tmp_path: Path) -> None:
-    """_read_plan must accept any path _list_plans advertises, regardless of depth.
+    """_read_plan must accept any path list_plans advertises, regardless of depth.
 
     Regression for Bug 1: ``PurePath.match("docs/plans/**/*.md")`` rejects
     ``docs/plans/a/b/c/d.md`` (pathlib's match requires at least one ``**``
@@ -318,7 +318,7 @@ def test_read_plan_deep_docs_plans_path_matches_discover_surface(tmp_path: Path)
     deep.parent.mkdir(parents=True)
     deep.write_text("deep plan contents")
 
-    listed = _list_plans(tmp_path)
+    listed = list_plans(tmp_path)
     assert "docs/plans/a/b/c/d.md" in listed
     assert _read_plan(tmp_path, "docs/plans/a/b/c/d.md") == "deep plan contents"
 
@@ -329,7 +329,7 @@ def test_read_plan_deep_specs_path_matches_discover_surface(tmp_path: Path) -> N
     deep.parent.mkdir(parents=True)
     deep.write_text("deep spec contents")
 
-    listed = _list_plans(tmp_path)
+    listed = list_plans(tmp_path)
     assert "specs/a/b/c.md" in listed
     assert _read_plan(tmp_path, "specs/a/b/c.md") == "deep spec contents"
 
@@ -344,7 +344,7 @@ def test_read_plan_denies_agents_md_outside_root(tmp_path: Path) -> None:
 
     Regression for Bug 2 (security): ``PurePath.match("AGENTS.md")`` is a
     tail match with no leading anchor, so ``nested/AGENTS.md`` matched under
-    the old matcher and became readable even though ``_list_plans`` (which
+    the old matcher and became readable even though ``list_plans`` (which
     uses ``base.glob("AGENTS.md")``) correctly anchored the pattern to the
     root. The single-source fix restores parity.
     """
@@ -352,7 +352,7 @@ def test_read_plan_denies_agents_md_outside_root(tmp_path: Path) -> None:
     nested.parent.mkdir(parents=True)
     nested.write_text("attacker dropped")
 
-    assert "nested/AGENTS.md" not in _list_plans(tmp_path)
+    assert "nested/AGENTS.md" not in list_plans(tmp_path)
     with pytest.raises(PermissionError, match="not a plan or spec"):
         _read_plan(tmp_path, "nested/AGENTS.md")
 
@@ -369,7 +369,7 @@ def test_read_plan_denies_plan_md_outside_root(tmp_path: Path) -> None:
     hidden.parent.mkdir(parents=True)
     hidden.write_text("attacker dropped")
 
-    assert "daemon/src/secrets.plan.md" not in _list_plans(tmp_path)
+    assert "daemon/src/secrets.plan.md" not in list_plans(tmp_path)
     with pytest.raises(PermissionError, match="not a plan or spec"):
         _read_plan(tmp_path, "daemon/src/secrets.plan.md")
 
@@ -380,7 +380,7 @@ def test_read_plan_denies_nested_claude_md(tmp_path: Path) -> None:
     nested.parent.mkdir(parents=True)
     nested.write_text("nested claude")
 
-    assert "nested/CLAUDE.md" not in _list_plans(tmp_path)
+    assert "nested/CLAUDE.md" not in list_plans(tmp_path)
     with pytest.raises(PermissionError, match="not a plan or spec"):
         _read_plan(tmp_path, "nested/CLAUDE.md")
 
@@ -391,7 +391,7 @@ def test_read_plan_denies_nested_spec_md(tmp_path: Path) -> None:
     nested.parent.mkdir(parents=True)
     nested.write_text("nested spec")
 
-    assert "nested/SPEC.md" not in _list_plans(tmp_path)
+    assert "nested/SPEC.md" not in list_plans(tmp_path)
     with pytest.raises(PermissionError, match="not a plan or spec"):
         _read_plan(tmp_path, "nested/SPEC.md")
 
@@ -402,7 +402,7 @@ def test_read_plan_denies_nested_spec_md(tmp_path: Path) -> None:
 
 
 async def test_find_plans_tool_returns_text_block(tmp_path: Path) -> None:
-    """The find_plans tool wraps _list_plans output in the MCP text-block shape."""
+    """The find_plans tool wraps list_plans output in the MCP text-block shape."""
     (tmp_path / "docs" / "plans").mkdir(parents=True)
     (tmp_path / "docs" / "plans" / "a.md").write_text("a")
     (tmp_path / "CLAUDE.md").write_text("claude")
@@ -685,3 +685,59 @@ async def test_plans_mcp_server_dispatches_through_registered_handlers(
     read_block = read_payload.content[0]
     assert isinstance(read_block, mcp_types.TextContent)
     assert read_block.text == "alpha plan"
+
+
+# ---------------------------------------------------------------------------
+# M2 Task 2.1 — _discover filters paths resolving outside project_root (#8)
+# ---------------------------------------------------------------------------
+
+
+def test_discover_rejects_escaped_symlink(tmp_path: Path) -> None:
+    """A symlink under docs/plans/ that resolves outside project_root is dropped.
+
+    Security property: a plan-shaped path whose ``.resolve()`` escapes
+    ``base`` cannot be advertised by ``list_plans`` or read by
+    ``_read_plan``. Enforced in ``_discover`` so both inherit the
+    filter for free — no escaping path can be advertised, read, or
+    leaked via diagnostic.
+    """
+    # Create a real file outside the project root.
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret content")
+
+    # Create a project with docs/plans/, a legitimate plan, and an
+    # escape symlink at the same conventional location.
+    project = tmp_path / "project"
+    plans_dir = project / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    (plans_dir / "ok.md").write_text("# Legitimate plan\n")
+    escape = plans_dir / "escape.md"
+    escape.symlink_to(outside)
+
+    listed = list_plans(project)
+
+    assert "docs/plans/ok.md" in listed
+    assert "docs/plans/escape.md" not in listed
+    # Defensive: nothing in the list should reference the outside path.
+    assert not any("outside" in p for p in listed)
+
+
+def test_read_plan_rejects_escaped_symlink(tmp_path: Path) -> None:
+    """``_read_plan`` refuses a symlink that resolves outside project_root.
+
+    Two fail-closed gates cover this: ``_read_plan``'s own
+    ``relative_to(base)`` check fires first (yielding "escapes project
+    root"), and even if that were ever bypassed, ``_discover``'s new
+    ``is_relative_to`` filter keeps the resolved path out of the
+    membership set. Either way, no ValueError leaks out of
+    ``_read_plan`` and the fail-closed contract is intact.
+    """
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret content")
+    project = tmp_path / "project"
+    plans_dir = project / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    (plans_dir / "escape.md").symlink_to(outside)
+
+    with pytest.raises(PermissionError, match="escapes project root|not a plan"):
+        _read_plan(project, "docs/plans/escape.md")

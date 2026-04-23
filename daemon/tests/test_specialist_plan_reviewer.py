@@ -228,6 +228,9 @@ async def test_main_branch_fallback_includes_uncommitted_diff(
 
     prompt = brain.calls[-1].user_utterance
     assert "UNCOMMITTED_EDIT" in prompt
+    # Banner is gated on fallback_err is not None — the on-main path
+    # never attempted a merge-base diff, so no banner appears.
+    assert "(fallback:" not in prompt
 
 
 @pytest.mark.asyncio
@@ -379,3 +382,300 @@ async def test_plan_reviewer_aborts_on_redaction_failure(
     assert "gitleaks binary not found" in response.summary
     assert "abort" in response.summary.lower() or "unavailable" in response.summary.lower()
     assert len(brain.calls) == 0, "brain.query must not fire when redaction fails"
+
+
+# ---------------------------------------------------------------------------
+# Unreadable-plan diagnostic surfacing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_review_surfaces_unreadable_plan_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """A plan file that can't be read (non-UTF-8) surfaces under UNREADABLE PLANS.
+
+    Phase-A parity: _current_branch and _capture_diff already surface
+    errors as '(diagnostic: ...)' in the prompt. _collect_plans
+    previously swallowed OSError/UnicodeDecodeError silently; now the
+    brain sees 'these files exist but we couldn't read them' instead of
+    'these files never existed'.
+    """
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    # A legitimate, readable plan
+    (plans_dir / "ok.md").write_text("# OK Plan\nreadable body\n")
+    # A binary blob that isn't valid UTF-8
+    (plans_dir / "bad.md").write_bytes(b"\xff\xfe\x00\x00not utf-8")
+    _commit(tmp_path, "plans")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=tmp_path)
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # Readable plan still present
+    assert "# OK Plan" in prompt
+    # New section header present
+    assert "=== UNREADABLE PLANS ===" in prompt
+    # Failing file's path is named in the diagnostic
+    unreadable_section = prompt.split("=== UNREADABLE PLANS ===", 1)[1]
+    assert "bad.md" in unreadable_section
+    # Diagnostic mentions the failure mode
+    assert "utf-8" in unreadable_section.lower() or "decode" in unreadable_section.lower()
+
+
+@pytest.mark.asyncio
+async def test_prompt_has_no_contradiction_when_all_plans_unreadable(
+    tmp_path: Path,
+) -> None:
+    """When every discovered plan is unreadable, the PLANS section must not
+    claim 'no plan or spec files discovered' — that contradicts the
+    UNREADABLE PLANS section which names specific discovered-but-unreadable
+    files.
+    """
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    # Two non-UTF-8 blobs — no readable plan at all.
+    (plans_dir / "bad1.md").write_bytes(b"\xff\xfe\x00\x00not utf-8 one")
+    (plans_dir / "bad2.md").write_bytes(b"\xff\xfe\x00\x00not utf-8 two")
+    _commit(tmp_path, "only-bad-plans")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=tmp_path)
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # Must surface both filenames as unreadable diagnostics.
+    assert "=== UNREADABLE PLANS ===" in prompt
+    assert "bad1.md" in prompt
+    assert "bad2.md" in prompt
+    # Must NOT claim nothing was discovered — that contradicts the list above.
+    assert "no plan or spec files discovered" not in prompt
+    # Must still signal the empty-readable state somehow, pointing to the
+    # UNREADABLE PLANS section.
+    plans_section = prompt.split("=== PLANS ===", 1)[1].split("=== UNREADABLE PLANS ===", 1)[0]
+    assert "no readable plan" in plans_section.lower(), (
+        f"PLANS section should say 'no readable plan...'; got: {plans_section!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_review_omits_unreadable_section_when_all_plans_load(
+    tmp_path: Path,
+) -> None:
+    """When every plan reads cleanly, the UNREADABLE PLANS section is absent.
+
+    Avoids cluttering the prompt with an empty diagnostic header.
+    """
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    (plans_dir / "ok.md").write_text("# OK Plan\nreadable body\n")
+    _commit(tmp_path, "plans")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=tmp_path)
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    assert "# OK Plan" in prompt
+    # No empty section header
+    assert "=== UNREADABLE PLANS ===" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_review_oserror_diagnostic_omits_absolute_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OSError diagnostics use exc.strerror, not str(exc) — no absolute path leak.
+
+    str(OSError) embeds the full filesystem path, e.g.
+    'OSError: [Errno 13] Permission denied: /Users/.../docs/plans/x.md'.
+    The brain already has the relative path via the '--- {rel} ---'
+    section header; surfacing the absolute path again is a needless
+    leak of usernames / client-project names through the prompt.
+    """
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    secret = plans_dir / "x.md"
+    secret.write_text("# X\n")
+    _commit(tmp_path, "plans")
+
+    # Inject a synthetic OSError via monkeypatch: chmod 0 is unreliable
+    # across platforms (owner reads can still succeed on some setups),
+    # so swap Path.read_text for an implementation that raises OSError
+    # with the absolute path embedded — mirroring real PermissionError
+    # behaviour on POSIX.
+    real_read_text = Path.read_text
+
+    def fake_read_text(
+        self: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> str:
+        if self == secret:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=tmp_path)
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # The relative path appears in the section header (expected).
+    assert "x.md" in prompt
+    # The ABSOLUTE path must NOT appear — that's the leak we're closing.
+    assert str(tmp_path) not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Size caps — per-file + total-budget (#2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_per_file_cap_truncates_individual_plans(tmp_path: Path) -> None:
+    """Plans longer than max_plan_chars get a truncation marker."""
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    big = "x" * 120_000
+    (plans_dir / "big.md").write_text(big)
+    _commit(tmp_path, "big plan")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(
+        brain=brain,
+        repo=tmp_path,
+        max_plan_chars=50_000,
+        max_total_plan_chars=200_000,
+    )
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # Per-file truncation marker present with the exact elided count.
+    assert "[... truncated: 70000 chars elided ...]" in prompt
+    # The full 120k body must NOT appear; allow modest overhead for
+    # other prompt sections that don't contain 'x'.
+    assert prompt.count("x") <= 60_000  # 50k truncated body + small slack
+
+
+@pytest.mark.asyncio
+async def test_total_cap_drops_remaining_plans(tmp_path: Path) -> None:
+    """Plans beyond max_total_plan_chars are replaced by an omission marker.
+
+    Asserts the full policy, not just the marker's presence:
+
+    * Insertion order of the plans that *do* land is preserved
+      (``p0 < p1 < p2``).
+    * The last plan is omitted (``p4.md`` does not appear).
+    * The marker names the exact remaining count (``"2 plans omitted"``;
+      grammatically plural since two are dropped).
+    * The marker sits *after* the last included plan, not before —
+      proving the early-exit ordering rather than a stray substring.
+    """
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    # 5 plans × 50k each = 250k, exceeds 200k total cap.
+    for i in range(5):
+        (plans_dir / f"p{i}.md").write_text("y" * 50_000)
+    _commit(tmp_path, "many plans")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(
+        brain=brain,
+        repo=tmp_path,
+        max_plan_chars=60_000,
+        max_total_plan_chars=200_000,
+    )
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # At least the first plan landed and the budget number is named.
+    assert "p0.md" in prompt
+    assert "200000" in prompt
+    # Ordering property: insertion order preserved for included plans.
+    assert prompt.index("p0.md") < prompt.index("p1.md") < prompt.index("p2.md")
+    # Last-plan-dropped property: p4 is past the budget, so it never appears.
+    assert "p4.md" not in prompt
+    # Exact count in marker — 5 plans in, 3 land, 2 are omitted.
+    assert "2 plans omitted" in prompt
+    # Position property: marker follows the last included plan, not precedes it.
+    assert prompt.index("p2.md") < prompt.index("plans omitted")
+
+
+def test_caps_have_sensible_defaults(tmp_path: Path) -> None:
+    """Defaults: max_plan_chars=50_000, max_total_plan_chars=200_000.
+
+    Pins the defaults so a future change is deliberate. Constructor is
+    keyword-only on these kwargs.
+    """
+    reviewer = PlanReviewer(brain=MockBrain(), repo=tmp_path)
+    assert reviewer._max_plan_chars == 50_000  # noqa: SLF001
+    assert reviewer._max_total_plan_chars == 200_000  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# Merge-base fallback banner (#3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_capture_diff_falls_back_when_main_ref_absent(tmp_path: Path) -> None:
+    """Feature branch but no 'main' ref → fall back to working-tree-vs-HEAD.
+
+    Banner: the fallback diff text starts with a one-line marker telling
+    the brain it came from the fallback path, not the merge-base diff.
+    """
+    # Init with default branch 'feat-alone' instead of 'main'.
+    _run("git", "init", "-b", "feat-alone", cwd=tmp_path)
+    _run("git", "config", "user.email", "test@example.com", cwd=tmp_path)
+    _run("git", "config", "user.name", "Test User", cwd=tmp_path)
+    _run("git", "config", "commit.gpgsign", "false", cwd=tmp_path)
+    (tmp_path / "docs" / "plans").mkdir(parents=True)
+    (tmp_path / "docs" / "plans" / "foo.md").write_text("# Plan Foo\n")
+    _commit(tmp_path, "initial")
+    # Make an uncommitted edit so `git diff` has output.
+    (tmp_path / "docs" / "plans" / "foo.md").write_text("# Plan Foo\nUNCOMMITTED_EDIT\n")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=tmp_path)
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # Fallback engaged — uncommitted edit surfaces.
+    assert "UNCOMMITTED_EDIT" in prompt
+    diff_section = prompt.split("=== DIFF ===", 1)[1]
+    diff_lines = [line for line in diff_section.splitlines() if line.strip()]
+    assert diff_lines, "diff section was unexpectedly empty"
+
+    # Banner must appear in the diff section, and it must sit ABOVE the
+    # first ``diff --git`` hunk header. That is the real property:
+    # the brain sees the mode switch before the content it is interpreting.
+    # Position-anchoring on the hunk (not the diagnostic region) keeps the
+    # test robust to future changes in how ``_assemble_prompt`` renders
+    # ``(diagnostic: ...)`` — which is multi-line because git stderr is.
+    fallback_idx = next(
+        (i for i, line in enumerate(diff_lines) if line.startswith("(fallback:")),
+        None,
+    )
+    assert fallback_idx is not None, (
+        f"banner missing from diff section; first 5 lines: {diff_lines[:5]}"
+    )
+    hunk_idx = next(
+        (i for i, line in enumerate(diff_lines) if line.startswith("diff --git ")),
+        len(diff_lines),
+    )
+    assert fallback_idx < hunk_idx, (
+        f"banner must appear before the first diff hunk header; "
+        f"fallback_idx={fallback_idx}, hunk_idx={hunk_idx}"
+    )
+    assert "working-tree" in diff_lines[fallback_idx].lower(), diff_lines[fallback_idx]
