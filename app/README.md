@@ -1,16 +1,3 @@
----
-title: reachy-ducky
-emoji: "\U0001F986"
-colorFrom: yellow
-colorTo: blue
-sdk: static
-pinned: false
-short_description: Read-only rubber-ducky companion for agentic SWE work.
-tags:
-  - reachy_mini
-  - reachy_mini_python_app
----
-
 # Reachy Ducky — Reachy Mini App
 
 The Reachy Mini side of the [Reachy Ducky project](https://github.com/Obsidian-Owl/reachy-ducky).

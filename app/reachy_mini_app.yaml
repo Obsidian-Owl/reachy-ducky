@@ -1,3 +1,8 @@
+# Canonical app metadata — single source of truth.
+# The HF Space README frontmatter was removed 2026-04-23 to avoid drift
+# (see closed issue #16). If HF Space rendering needs metadata in the
+# future, generate it from this file at publish time instead of
+# duplicating.
 title: reachy-ducky
 emoji: "\U0001F986"
 python_version: "3.12"
