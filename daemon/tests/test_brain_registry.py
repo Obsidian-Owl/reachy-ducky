@@ -186,3 +186,29 @@ def test_factory_receives_project(tmp_path: Path) -> None:
     assert len(received) == 1
     assert received[0].slug == "demo"
     assert received[0].github_repo == "Obsidian-Owl/demo"
+
+
+def test_project_for_returns_project(tmp_path: Path) -> None:
+    """``project_for`` returns the full Project — route needs github_repo, not just path."""
+    project = Project(
+        slug="demo",
+        path=tmp_path,
+        github_repo="Obsidian-Owl/demo",
+        primary=True,
+    )
+    reg = BrainRegistry(projects=[project], build_brain=lambda _: MockBrain())
+
+    fetched = reg.project_for("demo")
+    assert fetched.slug == "demo"
+    assert fetched.github_repo == "Obsidian-Owl/demo"
+    assert reg.built_slugs() == []  # project lookup must NOT trigger a brain build
+
+
+def test_project_for_raises_on_unknown_slug(tmp_path: Path) -> None:
+    """Unknown slug raises :class:`KeyError` (HTTP layer maps to 404, same as the others)."""
+    reg = BrainRegistry(
+        projects=[Project(slug="demo", path=tmp_path)],
+        build_brain=lambda _: MockBrain(),
+    )
+    with pytest.raises(KeyError):
+        reg.project_for("nope")
