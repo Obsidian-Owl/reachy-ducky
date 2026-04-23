@@ -21,7 +21,7 @@ npx gitnexus analyze --skip-agents-md   # refresh code index (incremental by def
 
 First-time daemon setup is `uv run reachy-ducky init` — it prompts for daemon host/port, an optional auth token, an optional GitHub PAT, and at least one project (slug + git-repo path + optional `github_repo`). Writes `~/.reachy-ducky/config.toml`, a 0600 `~/.reachy-ducky/.env` for any secrets, and seeds the memory tree. Re-running is safe: the wizard detects existing config and asks before overwriting.
 
-On the robot only: `uv sync --all-packages --extra robot` additionally installs `reachy-mini` from the app package's `robot` extra.
+`reachy-mini` is a plain base dep on the app package; `uv sync --all-packages --group dev` installs it on Mac dev machines, Linux CI, and the robot alike (the upstream `gstreamer-msvc-runtime` platform-marker bug is patched at the workspace root via `[tool.uv] dependency-metadata`).
 
 ### Prereqs for the daemon's Pattern B brain
 
@@ -35,8 +35,8 @@ The thinking brain spawns external MCP servers:
 Live-Claude integration tests run via `.github/workflows/integration.yml` (PR-with-`integration`-label or weekly cron) using the `CLAUDE_CODE_OAUTH_TOKEN` org secret.
 
 Integration tests (live Claude / OpenAI / HF): `uv run pytest -m integration` with relevant env vars.
-Hardware tests (Reachy Mini): `uv run pytest -m hardware`, requires connected robot.
-SDK contract tests (`@pytest.mark.sdk`): `uv run pytest -m sdk` — require the reachy-mini SDK installed, no daemon. Introspect the `ReachyMini` class surface to catch upstream method renames before they hit real hardware. CI runs these automatically via `.github/workflows/sdk-contract.yml` on every PR.
+Hardware tests (Reachy Mini): `uv run pytest -m hardware`, requires a connected robot. Covers instance-level SDK introspection (construction, body/head move calls) and end-to-end audio / motion / mute flows.
+SDK class-surface contract tests: run in the default unit tier — `reachy-mini` installs on every machine, and the tests only introspect the `ReachyMini` class (no daemon, no media init) to catch upstream method renames before they hit real hardware.
 Sim tests (`@pytest.mark.sim`): local-only; require a running `reachy-mini-daemon --sim` on `localhost:8000`. No CI coverage today (reachy-mini's media stack doesn't cleanly spin up on GitHub-hosted ubuntu-latest — see history on the closed `cleanup/sim-tests` branch).
 
 Local sim dev flow:

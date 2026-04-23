@@ -30,13 +30,30 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Install pygobject/pycairo build headers (Linux only)
+        if: runner.os == 'Linux'
+        # Build-time headers for pygobject/pycairo, transitive deps of
+        # reachy-mini (now a plain base dep via app/pyproject.toml). Even
+        # though we never call media/GI at runtime in the default test
+        # tier, pycairo 1.29 still builds from source on install and
+        # needs these. macOS runners get pycairo wheels — no apt step
+        # needed there.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev \
+            libgirepository1.0-dev \
+            libglib2.0-dev
+
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         # --group dev installs workspace-wide dev tools (pytest, ruff, mypy,
-        # bandit, pytest-asyncio, pytest-httpx). We do NOT use --all-extras
-        # here because the app package's `robot` extra pulls reachy-mini,
-        # which has a broken Windows-only transitive dep, and the menubar's
-        # `macos` extra pulls rumps which is macOS-only.
+        # bandit, pytest-asyncio, pytest-httpx). reachy-mini is a plain
+        # base dep and installs cross-platform (the upstream
+        # gstreamer-msvc-runtime platform-marker bug is patched via
+        # [tool.uv] dependency-metadata in pyproject.toml). We do NOT use
+        # --all-extras because the menubar's `macos` extra pulls rumps
+        # which is macOS-only.
         run: uv sync --all-packages --group dev
 
       - name: Install dependencies (macOS)

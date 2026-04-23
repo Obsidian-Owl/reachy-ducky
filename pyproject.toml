@@ -1,6 +1,32 @@
 [tool.uv.workspace]
 members = ["daemon", "app", "menubar", "protocol"]
 
+# Upstream ``gstreamer-libs`` ships divergent ``Requires-Dist`` across
+# platform wheels (macOS wheel lists only ``setuptools``; Windows
+# wheels additionally list ``gstreamer-msvc-runtime``) (no sdist
+# published at time of writing on 1.28.x).
+# uv picks one wheel's metadata as the universal value, which on
+# macOS / Linux incorrectly requires ``gstreamer-msvc-runtime`` — a
+# Windows-only package with no matching sdist / non-win wheel.
+#
+# This override patches the ``Requires-Dist`` to match the ACTUAL
+# per-wheel graph. Mirrors the intent of pollen-robotics/reachy_mini_conversation_app
+# @ebfee42c9dd22a3075b9c8d30fc14018366a8f1b (fetch date 2026-04-22)
+# but with ``version`` omitted so the override applies to all affected
+# versions (Pollen's verbatim version pin at 1.28.1 is lock-state, not
+# intentional). Remove when upstream unifies wheel metadata or
+# publishes an sdist. Tracked in #61.
+#
+# Empirically, on ``reachy-mini==1.6.4``, only ``gstreamer-libs``
+# carries the bad marker — the single-entry override suffices. If a
+# future ``reachy-mini`` upgrade resurfaces the same bug on
+# ``gstreamer-bundle`` or another sibling, add entries rather than
+# widen this one.
+[tool.uv]
+dependency-metadata = [
+    { name = "gstreamer-libs", requires-dist = ["gstreamer-msvc-runtime; sys_platform == 'win32'", "setuptools"] },
+]
+
 # PEP 735 dependency groups — workspace-wide dev tools. Subpackages no longer
 # each carry their own `[project.optional-dependencies].dev`. Install with:
 #   uv sync --all-packages --group dev
@@ -27,12 +53,11 @@ testpaths = ["daemon/tests", "app/tests", "menubar/tests", "protocol/tests"]
 asyncio_mode = "auto"
 # Deselect tiers that need external setup by default. Opt in via
 # `-m <marker>`. Markers are declared below.
-addopts = "-m 'not sim and not sdk'"
+addopts = "-m 'not sim and not hardware and not integration'"
 markers = [
-    "hardware: requires Reachy Mini hardware",
+    "hardware: requires Reachy Mini hardware reachable (LAN for Wireless, USB for Lite)",
     "integration: requires live external APIs",
     "sim: requires a running reachy-mini-daemon --sim (pytest -m sim)",
-    "sdk: requires the reachy-mini SDK installed (no daemon); catches upstream API drift",
 ]
 
 # Mypy per-module overrides. Keep this list short — one-liners for deps
@@ -43,20 +68,12 @@ markers = [
 #          upstream wheel ships no stubs / py.typed marker. The heavy
 #          import is deferred into gaze_loop (hardware-tier only), but
 #          mypy still needs this entry to resolve the module reference.
-#   reachy_mini: robot SDK, only installed under `--extra robot`. Present
-#          in CI for the sdk-contract job (app/tests/test_reachy_sdk_contract.py);
-#          absent in a default dev venv. Matches the inline pyright
-#          ignore on the same import.
 [[tool.mypy.overrides]]
 module = "rumps"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "mediapipe"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "reachy_mini"
 ignore_missing_imports = true
 
 # Pyright config lives in ./pyrightconfig.json (takes precedence over

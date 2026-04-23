@@ -9,14 +9,12 @@ dependencies = [
     "mediapipe>=0.10,<0.12",
     "httpx>=0.27,<0.29",
     "numpy>=1.26,<3",
+    # reachy-mini is a plain base dep — installs cross-platform. The
+    # gstreamer-msvc-runtime platform-marker bug is patched at the
+    # workspace root via ``[tool.uv] dependency-metadata`` (mirrors
+    # pollen-robotics/reachy_mini_conversation_app).
+    "reachy-mini>=1.6.4,<2",
 ]
-
-# reachy-mini has a broken Windows-only transitive dep (gstreamer-msvc-runtime)
-# that prevents install on non-Windows. The app package is primarily deployed
-# to the Reachy Mini (Linux/aarch64); use `uv sync --extra robot` on the
-# robot. Mac dev does not need reachy-mini for unit tests.
-[project.optional-dependencies]
-robot = ["reachy-mini>=1.0.0rc1,<2"]
 
 [build-system]
 requires = ["hatchling"]

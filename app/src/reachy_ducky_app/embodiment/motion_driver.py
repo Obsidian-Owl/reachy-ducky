@@ -2,8 +2,10 @@
 
 ``MotionDriver`` is the ABC the :class:`EmbodimentStateMachine` talks to.
 ``MockMotionDriver`` records calls for unit tests. ``ReachyMotionDriver``
-wraps a real ``reachy_mini.ReachyMini`` instance and is only instantiable
-on the robot where the ``robot`` extra is installed.
+wraps a real ``reachy_mini.ReachyMini`` instance. ``reachy_mini`` is a
+plain base dep (see ``app/pyproject.toml``), so the driver is importable
+everywhere; the ``reachy_mini: object`` parameter shape is duck-typed so
+unit tests can pass a ``MockReachyMini`` without depending on the live SDK.
 """
 
 from __future__ import annotations
@@ -61,10 +63,11 @@ class MockMotionDriver(MotionDriver):
 class ReachyMotionDriver(MotionDriver):
     """Real driver. Hardware-only.
 
-    ``reachy_mini`` is in ``app/pyproject.toml``'s ``robot`` extra (not
-    default) because its transitive deps break on non-Linux dev machines.
-    On the Reachy itself, users install via ``uv sync --extra robot``.
-    The caller constructs a ``ReachyMini`` and passes it in.
+    ``reachy_mini`` is a plain base dep on ``app/pyproject.toml`` —
+    installs cross-platform, including Mac dev machines (the upstream
+    ``gstreamer-msvc-runtime`` platform-marker bug is patched at the
+    workspace root via ``[tool.uv] dependency-metadata``). The caller
+    constructs a ``ReachyMini`` and passes it in.
     """
 
     def __init__(self, mini: object) -> None:

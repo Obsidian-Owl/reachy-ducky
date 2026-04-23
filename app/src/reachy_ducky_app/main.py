@@ -6,14 +6,16 @@ hosting the dashboard at ``http://<robot>:8000``) calls
 ``.run(reachy_mini, stop_event)`` when the app is started from the
 dashboard.
 
-**Hardware-only.** ``reachy_mini`` and ``reachy_mini_app`` live in the
-``robot`` optional extra (see ``app/pyproject.toml``) because their
-transitive deps break on non-Linux dev machines. This module is
-importable on any platform because we do NOT inherit from
+``reachy_mini`` and ``reachy_mini_app`` are plain base deps (see
+``app/pyproject.toml``); the upstream ``gstreamer-msvc-runtime``
+platform-marker bug is patched at the workspace root via
+``[tool.uv] dependency-metadata``, so they install on Mac/Linux/Windows
+dev venvs AND on the robot. This module still does NOT inherit from
 ``ReachyMiniApp`` at class-definition time — we match its structural
-shape instead. All actual robot-side usage lives inside :meth:`run` /
-:meth:`_run_async`, which are called by the on-robot daemon (where the
-``robot`` extra is installed) and never at import time.
+shape instead — to keep module-load cheap: importing ``ReachyMiniApp``
+would pull in the WebRTC / media-pipeline side-effects at import time.
+All actual robot-side usage lives inside :meth:`run` / :meth:`_run_async`,
+which are called by the on-robot daemon and never at import time.
 """
 
 from __future__ import annotations
@@ -41,11 +43,13 @@ _STOP_BRIDGE_POLL_SECONDS = 0.1
 class ReachyDuckyApp:
     """Entry point matching ``reachy_mini_app.ReachyMiniApp``'s shape.
 
-    We deliberately do NOT inherit from ``reachy_mini_app.ReachyMiniApp``
-    at class-definition time: the ``reachy_mini_app`` package is in the
-    ``robot`` optional extra (not installed on macOS / Linux CI dev
-    venvs). The on-robot dashboard instantiates this class and calls
-    ``.run(reachy_mini, stop_event)`` structurally — no Python
+    ``reachy_mini_app`` installs alongside ``reachy_mini`` as a plain
+    base dep, but we still deliberately do NOT inherit from
+    ``reachy_mini_app.ReachyMiniApp`` at class-definition time: doing so
+    would force the WebRTC / media-pipeline imports at module-load. The
+    structural-shape pattern keeps module-load cheap for unit tests and
+    non-robot dev runs. The on-robot dashboard instantiates this class
+    and calls ``.run(reachy_mini, stop_event)`` structurally — no Python
     inheritance is required for the dispatch to work.
     """
 

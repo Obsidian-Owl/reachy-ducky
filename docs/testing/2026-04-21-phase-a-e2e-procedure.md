@@ -147,11 +147,14 @@ Install the robot-side deps (SSH into the robot):
 ```bash
 ssh <robot>
 cd reachy-ducky
-uv sync --all-packages --extra robot
+uv sync --all-packages --group dev
 export OPENAI_API_KEY=sk-...
 export DAEMON_URL=http://<mac-host>:8765
 export DAEMON_AUTH_TOKEN=<same as REACHY_DUCKY_AUTH_TOKEN on the Mac>
 ```
+
+`reachy-mini` is a plain base dep and installs on every platform,
+including this Linux/aarch64 robot image — no `--extra robot` needed.
 
 Start path: the on-robot Pollen dashboard (`http://<robot>:8000`)
 instantiates `ReachyDuckyApp` from `app_class:

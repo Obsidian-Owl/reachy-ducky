@@ -27,8 +27,8 @@ smoke procedure and known gaps.
 ## Development
 
 - `uv sync --all-packages --group dev` — install the workspace plus dev tools
-  (pytest, ruff, mypy, bandit). On the robot only, add `--extra robot` to pull
-  `reachy-mini`.
+  (pytest, ruff, mypy, bandit). This also installs `reachy-mini` on every
+  platform, so the SDK class-surface contract tests run in the default tier.
 - `uv run pytest -q` — unit tests (default tier).
 - `uv run pytest -m integration` — integration tests, opt-in; require live API
   env vars (`OPENAI_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, etc.).
