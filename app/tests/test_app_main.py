@@ -249,12 +249,12 @@ async def test_run_async_constructs_voice_with_default_mic_and_speaker(
     mic_factory_calls = 0
     speaker_factory_calls = 0
 
-    def _spy_mic_factory() -> MicSource:
+    def _spy_mic_factory(reachy_mini: object | None = None) -> MicSource:
         nonlocal mic_factory_calls
         mic_factory_calls += 1
         return MockMicSource()
 
-    def _spy_speaker_factory() -> SpeakerSink:
+    def _spy_speaker_factory(reachy_mini: object | None = None) -> SpeakerSink:
         nonlocal speaker_factory_calls
         speaker_factory_calls += 1
         return MockSpeakerSink()

@@ -78,8 +78,8 @@ class ReachyDuckyApp:
         driver = ReachyMotionDriver(reachy_mini)
         sm = EmbodimentStateMachine(driver=driver)
         voice = OpenAIRealtimeVoice(
-            mic=load_default_mic_source(),
-            speaker=load_default_speaker_sink(),
+            mic=load_default_mic_source(reachy_mini=reachy_mini),
+            speaker=load_default_speaker_sink(reachy_mini=reachy_mini),
         )
         daemon = DaemonClient.from_env()
         wake = load_default_wake_detector()

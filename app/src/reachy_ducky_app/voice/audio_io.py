@@ -139,22 +139,27 @@ class ReachySpeakerSink(SpeakerSink):
         await loop.run_in_executor(None, push, float32)
 
 
-def load_default_mic_source() -> MicSource:
-    """Factory for the production mic source.
+def load_default_mic_source(reachy_mini: object | None = None) -> MicSource:
+    """Return :class:`ReachyMicSource` when ``reachy_mini`` is given, else mock.
 
-    Phase A returns a silent :class:`MockMicSource`. A follow-up issue
-    swaps in a ``ReachyMicSource`` once the Reachy audio API is bound;
-    callers should never instantiate the mock directly outside tests.
+    The on-robot Pollen daemon hands :meth:`ReachyDuckyApp.run` a live
+    ``ReachyMini`` instance; :meth:`ReachyDuckyApp._run_async` threads it
+    through this factory so production is hardware by default. Dev
+    machines and unit tests pass ``None`` (the default) and get the
+    silent :class:`MockMicSource`.
     """
-    return MockMicSource()
+    if reachy_mini is None:
+        return MockMicSource()
+    return ReachyMicSource(reachy_mini)
 
 
-def load_default_speaker_sink() -> SpeakerSink:
-    """Factory for the production speaker sink.
+def load_default_speaker_sink(reachy_mini: object | None = None) -> SpeakerSink:
+    """Return :class:`ReachySpeakerSink` when ``reachy_mini`` is given, else mock.
 
-    Phase A returns a dropping :class:`MockSpeakerSink`. A follow-up
-    issue swaps in a ``ReachySpeakerSink`` once the Reachy audio API is
-    bound; callers should never instantiate the mock directly outside
-    tests.
+    Symmetric with :func:`load_default_mic_source` — production path
+    selects the hardware-backed adapter when the on-robot daemon hands
+    us a live ``ReachyMini``; dev/unit path keeps the silent mock.
     """
-    return MockSpeakerSink()
+    if reachy_mini is None:
+        return MockSpeakerSink()
+    return ReachySpeakerSink(reachy_mini)

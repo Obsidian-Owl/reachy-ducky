@@ -221,3 +221,43 @@ async def test_reachy_speaker_sink_is_a_speaker_sink() -> None:
 
     sink = ReachySpeakerSink(FakeMini())
     assert isinstance(sink, SpeakerSink)
+
+
+def test_load_default_mic_source_returns_mock_when_reachy_mini_is_none() -> None:
+    """No reachy_mini -> MockMicSource (dev-machine / unit-test path)."""
+    src = load_default_mic_source(reachy_mini=None)
+    assert isinstance(src, MockMicSource)
+
+
+def test_load_default_mic_source_returns_hardware_impl_when_reachy_mini_given() -> None:
+    """A ReachyMini-like object -> ReachyMicSource.
+
+    Factory only checks truthiness; the returned adapter stores the
+    object for later ``frames()`` calls (which would then touch
+    ``.media.get_audio_sample``). A bare stand-in suffices here.
+    """
+
+    class FakeMini:
+        pass
+
+    src = load_default_mic_source(reachy_mini=FakeMini())
+    assert isinstance(src, ReachyMicSource)
+
+
+def test_load_default_speaker_sink_returns_mock_when_reachy_mini_is_none() -> None:
+    sink = load_default_speaker_sink(reachy_mini=None)
+    assert isinstance(sink, MockSpeakerSink)
+
+
+def test_load_default_speaker_sink_returns_hardware_impl_when_reachy_mini_given() -> None:
+    class FakeMini:
+        pass
+
+    sink = load_default_speaker_sink(reachy_mini=FakeMini())
+    assert isinstance(sink, ReachySpeakerSink)
+
+
+def test_load_default_factories_default_reachy_mini_to_none() -> None:
+    """Back-compat: factories callable with no args (returns mocks)."""
+    assert isinstance(load_default_mic_source(), MockMicSource)
+    assert isinstance(load_default_speaker_sink(), MockSpeakerSink)
