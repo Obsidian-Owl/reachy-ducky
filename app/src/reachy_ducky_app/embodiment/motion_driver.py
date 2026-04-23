@@ -68,15 +68,49 @@ class ReachyMotionDriver(MotionDriver):
     ``gstreamer-msvc-runtime`` platform-marker bug is patched at the
     workspace root via ``[tool.uv] dependency-metadata``). The caller
     constructs a ``ReachyMini`` and passes it in.
+
+    Named moves (``"neutral"``, ``"listening"``, etc.) are resolved to
+    SDK ``Move`` objects via ``RecordedMoves`` — the SDK ships two
+    default HuggingFace datasets (emotions + dances libraries). Libraries
+    are lazy-loaded on the first ``play_move`` call so tests that only
+    exercise ``go_to_sleep`` / ``wake_up`` don't trigger HF downloads.
     """
 
     def __init__(self, mini: object) -> None:
         # Typed as object — the concrete type comes from reachy_mini which
         # may not be installed on a dev machine. Callers pass a ReachyMini.
         self._mini = mini
+        # Lazy: resolved on first play_move() call via _get_move. Tests
+        # inject a fake list here; production code triggers HF download
+        # on first access (cached to disk for subsequent sessions).
+        self._move_libraries: list[object] | None = None
+
+    def _get_move(self, name: str) -> object:
+        """Resolve ``name`` to an SDK ``Move`` via RecordedMoves libraries.
+
+        Searches emotions library first, falls through to dances library.
+        Raises ``ValueError`` with a clear message if the name is in
+        neither — the SDK's own ``play_move`` would fail less helpfully.
+        """
+        if self._move_libraries is None:
+            from reachy_mini.motion.recorded_move import (  # type: ignore[import-untyped]
+                RecordedMoves,
+            )
+
+            self._move_libraries = [
+                RecordedMoves("pollen-robotics/reachy-mini-emotions-library"),
+                RecordedMoves("pollen-robotics/reachy-mini-dances-library"),
+            ]
+        for lib in self._move_libraries:
+            try:
+                return lib.get(name)  # type: ignore[attr-defined]
+            except ValueError:
+                continue
+        raise ValueError(f"Move '{name}' not found in emotions or dances library")
 
     def play_move(self, name: str) -> None:
-        self._mini.play_move(name)  # type: ignore[attr-defined]
+        move = self._get_move(name)
+        self._mini.play_move(move)  # type: ignore[attr-defined]
 
     def go_to_sleep(self) -> None:
         self._mini.goto_sleep()  # type: ignore[attr-defined]
