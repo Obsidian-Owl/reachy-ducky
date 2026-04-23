@@ -159,6 +159,51 @@ async def test_plan_reviewer_parses_response(httpx_mock: HTTPXMock) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pr_reviewer_explicit_pr_number(httpx_mock: HTTPXMock) -> None:
+    """``/specialists/pr-reviewer`` POSTs SpecialistRequest with pr_number set."""
+    httpx_mock.add_response(
+        method="POST",
+        url="http://127.0.0.1:8765/specialists/pr-reviewer",
+        json={
+            "name": "pr-reviewer",
+            "summary": "CI green, one Augment thread open — push a fix then merge.",
+            "flags": ["ci-green", "has-unresolved-comments"],
+        },
+    )
+    client = DaemonClient(base_url="http://127.0.0.1:8765")
+    resp = await client.pr_reviewer(project_slug="demo", pr_number=42)
+
+    assert isinstance(resp, SpecialistResponse)
+    assert resp.name == "pr-reviewer"
+    assert "ci-green" in resp.flags
+    assert "has-unresolved-comments" in resp.flags
+
+    sent = httpx_mock.get_request()
+    assert sent is not None
+    body = json.loads(sent.content)
+    assert body["name"] == "pr-reviewer"
+    assert body["project_slug"] == "demo"
+    assert body["pr_number"] == 42
+
+
+@pytest.mark.asyncio
+async def test_pr_reviewer_defaults_pr_number_to_none(httpx_mock: HTTPXMock) -> None:
+    """Omitting ``pr_number`` sends ``pr_number: null`` — the daemon's auto-detect path."""
+    httpx_mock.add_response(
+        method="POST",
+        url="http://127.0.0.1:8765/specialists/pr-reviewer",
+        json={"name": "pr-reviewer", "summary": "no-op", "flags": []},
+    )
+    client = DaemonClient(base_url="http://127.0.0.1:8765")
+    await client.pr_reviewer(project_slug="demo")
+
+    sent = httpx_mock.get_request()
+    assert sent is not None
+    body = json.loads(sent.content)
+    assert body["pr_number"] is None
+
+
+@pytest.mark.asyncio
 async def test_plan_reviewer_passes_branch(httpx_mock: HTTPXMock) -> None:
     """When given, ``branch`` is serialised into the posted body."""
     httpx_mock.add_response(

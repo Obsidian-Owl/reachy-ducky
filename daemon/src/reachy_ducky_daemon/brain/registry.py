@@ -83,6 +83,18 @@ class BrainRegistry:
             raise KeyError(slug)
         return self._projects[slug].path
 
+    def project_for(self, slug: str) -> Project:
+        """Return the full :class:`Project` for ``slug`` (no brain build).
+
+        The ``/specialists/pr-reviewer`` route needs ``github_repo`` in
+        addition to ``path``; keeping a single lookup instead of two
+        keeps the registry's immutability contract simple (one KeyError
+        path, one project instance).
+        """
+        if slug not in self._projects:
+            raise KeyError(slug)
+        return self._projects[slug]
+
     def primary_slug(self) -> str | None:
         """Return the ``primary=True`` project slug, or ``None`` if none configured."""
         return self._primary_slug

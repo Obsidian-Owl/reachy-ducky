@@ -1,0 +1,16 @@
+[
+  {
+    "id": 1,
+    "user": {"login": "augment-code[bot]"},
+    "path": "src/upload.py",
+    "line": 42,
+    "body": "This retry loop lacks a jitter term — will synchronize on multi-client failures."
+  },
+  {
+    "id": 2,
+    "user": {"login": "codex[bot]"},
+    "path": "src/auth.py",
+    "line": 7,
+    "body": "Potential timing-attack surface on the comparison."
+  }
+]

@@ -29,6 +29,7 @@ from starlette.types import ASGIApp
 from .brain.registry import BrainRegistry
 from .memory.layout import ensure_layout
 from .specialists.plan_reviewer import PlanReviewer
+from .specialists.pr_reviewer import PRReviewer
 
 # /docs and /openapi.json are open by intent. In the Tailscale-primary
 # deployment envelope the schema disclosure is an acceptable trade for
@@ -128,6 +129,38 @@ def create_app(
                 detail=f"unknown project: {req.project_slug}",
             ) from None
         return await PlanReviewer(brain=brain, repo=repo).review()
+
+    @app.post("/specialists/pr-reviewer", response_model=SpecialistResponse)
+    async def pr_reviewer_route(req: SpecialistRequest) -> SpecialistResponse:
+        # Validate project configuration BEFORE touching the brain factory so
+        # misconfiguration rejections (404 unknown-slug, 400 missing github_repo)
+        # stay cheap and side-effect-free. Brain construction is documented as
+        # pure config assembly today (brain/registry.py), but the invariant
+        # is only as solid as the docstring — order matters if that changes.
+        try:
+            project = registry.project_for(req.project_slug)
+        except KeyError:
+            raise HTTPException(
+                status_code=404,
+                detail=f"unknown project: {req.project_slug}",
+            ) from None
+        if not project.github_repo:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"project '{req.project_slug}' has no github_repo configured — "
+                    "pr-reviewer needs owner/repo to target the GitHub API"
+                ),
+            )
+        # Project.__post_init__ already validated the 'owner/repo' shape.
+        owner, repo_name = project.github_repo.split("/", 1)
+        brain = registry.brain_for(req.project_slug)
+        return await PRReviewer(
+            brain=brain,
+            repo=project.path,
+            owner=owner,
+            repo_name=repo_name,
+        ).review(pr_number=req.pr_number)
 
     return app
 

@@ -1,9 +1,12 @@
-"""Tests for the FastAPI server's POST /specialists/plan-reviewer endpoint."""
+"""Tests for the FastAPI server's POST /specialists/* endpoints."""
 
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from reachy_ducky_daemon.brain.interface import BrainInterface
@@ -139,3 +142,206 @@ def test_plan_reviewer_endpoint_invokes_brain_once(tmp_path: Path) -> None:
     assert len(brain.calls) == 1
     assert "# Plan" in brain.calls[0].user_utterance
     assert "Report drift" in brain.calls[0].user_utterance
+
+
+# ---------------------------------------------------------------------------
+# /specialists/pr-reviewer
+# ---------------------------------------------------------------------------
+
+
+def _ok(stdout: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+def _pr_registry(
+    repo: Path,
+    *,
+    github_repo: str | None = "Obsidian-Owl/reachy-ducky",
+    brain: BrainInterface | None = None,
+) -> BrainRegistry:
+    """One-project registry with a configurable ``github_repo`` for pr-reviewer tests."""
+    b = brain if brain is not None else MockBrain()
+    return BrainRegistry(
+        projects=[
+            Project(
+                slug="repo",
+                path=repo,
+                github_repo=github_repo,
+                primary=True,
+            )
+        ],
+        build_brain=lambda _: b,
+    )
+
+
+def _mock_gh_min(*, pr_json: str) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Minimum subprocess mocks for a pr-reviewer route happy-path request.
+
+    Any ``gh pr view`` returns ``pr_json``; everything else returns empty
+    list / envelope. Good enough to exercise routing and response shape
+    without over-specifying the fetch graph (covered in detail by the
+    specialist's own tests).
+    """
+
+    def _side_effect(
+        argv: list[str],
+        *args: Any,
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        if argv[:3] == ["gh", "pr", "view"]:
+            return _ok(pr_json)
+        if argv[:3] == ["gh", "pr", "diff"]:
+            return _ok("")
+        if argv[:2] == ["gh", "api"] and "check-runs" in argv[2]:
+            return _ok('{"total_count": 0, "check_runs": []}')
+        if argv[:2] == ["gh", "api"]:  # comments
+            return _ok("[]")
+        if argv[:3] == ["gh", "pr", "list"]:
+            return _ok('[{"number": 42}]')
+        if argv[:2] == ["git", "rev-parse"]:
+            return _ok("feat-retry\n")
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    return _side_effect
+
+
+_HAPPY_PR_JSON = (
+    '{"number": 42, "title": "feat: retry", "body": "Closes #15",'
+    ' "state": "OPEN", "mergeable": "MERGEABLE",'
+    ' "headRefName": "feat-retry", "baseRefName": "main",'
+    ' "url": "https://github.com/Obsidian-Owl/reachy-ducky/pull/42",'
+    ' "headRefOid": "abc123"}'
+)
+
+
+def test_pr_reviewer_endpoint_explicit_pr_number(tmp_path: Path) -> None:
+    """Explicit pr_number → 200 with pr-reviewer response."""
+    repo = _init_repo(tmp_path / "repo")
+    app = create_app(registry=_pr_registry(repo), memory_root=tmp_path / "mem")
+    client = TestClient(app)
+
+    with patch("subprocess.run", side_effect=_mock_gh_min(pr_json=_HAPPY_PR_JSON)):
+        r = client.post(
+            "/specialists/pr-reviewer",
+            json={"name": "pr-reviewer", "project_slug": "repo", "pr_number": 42},
+        )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "pr-reviewer"
+    assert "mock" in body["summary"].lower()
+
+
+def test_pr_reviewer_endpoint_auto_detects_when_no_pr_number(tmp_path: Path) -> None:
+    """No pr_number → route still resolves via git rev-parse + gh pr list."""
+    repo = _init_repo(tmp_path / "repo")
+    app = create_app(registry=_pr_registry(repo), memory_root=tmp_path / "mem")
+    client = TestClient(app)
+
+    with patch("subprocess.run", side_effect=_mock_gh_min(pr_json=_HAPPY_PR_JSON)):
+        r = client.post(
+            "/specialists/pr-reviewer",
+            json={"name": "pr-reviewer", "project_slug": "repo"},
+        )
+
+    assert r.status_code == 200
+    assert r.json()["name"] == "pr-reviewer"
+
+
+def test_pr_reviewer_endpoint_unknown_slug_returns_404(tmp_path: Path) -> None:
+    """Unknown slug → 404 with a useful detail (mirrors plan-reviewer behaviour)."""
+    repo = _init_repo(tmp_path / "repo")
+    app = create_app(registry=_pr_registry(repo), memory_root=tmp_path / "mem")
+    client = TestClient(app)
+
+    r = client.post(
+        "/specialists/pr-reviewer",
+        json={"name": "pr-reviewer", "project_slug": "nonexistent"},
+    )
+
+    assert r.status_code == 404
+    assert "nonexistent" in r.json()["detail"]
+
+
+def test_pr_reviewer_endpoint_missing_github_repo_returns_400(tmp_path: Path) -> None:
+    """Project without github_repo → 400 — pr-reviewer can't target GitHub without it."""
+    repo = _init_repo(tmp_path / "repo")
+    app = create_app(
+        registry=_pr_registry(repo, github_repo=None),
+        memory_root=tmp_path / "mem",
+    )
+    client = TestClient(app)
+
+    r = client.post(
+        "/specialists/pr-reviewer",
+        json={"name": "pr-reviewer", "project_slug": "repo", "pr_number": 42},
+    )
+
+    assert r.status_code == 400
+    assert "github_repo" in r.json()["detail"]
+
+
+def test_pr_reviewer_endpoint_400_does_not_build_brain(tmp_path: Path) -> None:
+    """The 400 "missing github_repo" path must not trigger a brain build.
+
+    The route should validate the Project *before* calling ``brain_for``
+    so misconfiguration errors stay cheap and side-effect-free. Uses a
+    counting factory to assert zero invocations on the rejection path.
+    """
+    repo = _init_repo(tmp_path / "repo")
+    build_count = 0
+
+    def _counting_factory(_: Project) -> BrainInterface:
+        nonlocal build_count
+        build_count += 1
+        return MockBrain()
+
+    registry = BrainRegistry(
+        projects=[Project(slug="repo", path=repo, github_repo=None, primary=True)],
+        build_brain=_counting_factory,
+    )
+    app = create_app(registry=registry, memory_root=tmp_path / "mem")
+    client = TestClient(app)
+
+    r = client.post(
+        "/specialists/pr-reviewer",
+        json={"name": "pr-reviewer", "project_slug": "repo", "pr_number": 42},
+    )
+
+    assert r.status_code == 400
+    assert build_count == 0, "400 path triggered a brain build — validation order is wrong"
+
+
+def test_pr_reviewer_endpoint_response_shape(tmp_path: Path) -> None:
+    """Response matches ``SpecialistResponse`` schema exactly — {name, summary, flags}."""
+    repo = _init_repo(tmp_path / "repo")
+    app = create_app(registry=_pr_registry(repo), memory_root=tmp_path / "mem")
+    client = TestClient(app)
+
+    with patch("subprocess.run", side_effect=_mock_gh_min(pr_json=_HAPPY_PR_JSON)):
+        r = client.post(
+            "/specialists/pr-reviewer",
+            json={"name": "pr-reviewer", "project_slug": "repo", "pr_number": 42},
+        )
+
+    assert r.status_code == 200
+    data = r.json()
+    assert set(data.keys()) == {"name", "summary", "flags"}
+    assert isinstance(data["flags"], list)
+
+
+def test_pr_reviewer_endpoint_invokes_brain_once(tmp_path: Path) -> None:
+    """Each POST triggers exactly one brain.query() call (Pattern A contract)."""
+    repo = _init_repo(tmp_path / "repo")
+    brain = MockBrain()
+    app = create_app(registry=_pr_registry(repo, brain=brain), memory_root=tmp_path / "mem")
+    client = TestClient(app)
+
+    with patch("subprocess.run", side_effect=_mock_gh_min(pr_json=_HAPPY_PR_JSON)):
+        client.post(
+            "/specialists/pr-reviewer",
+            json={"name": "pr-reviewer", "project_slug": "repo", "pr_number": 42},
+        )
+
+    assert len(brain.calls) == 1
+    assert "feat: retry" in brain.calls[0].user_utterance

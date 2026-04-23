@@ -45,6 +45,7 @@ class SpecialistRequest(_WireMessage):
     name: str
     project_slug: str
     branch: str | None = None
+    pr_number: int | None = None
 
 
 class SpecialistResponse(_WireResponse):
