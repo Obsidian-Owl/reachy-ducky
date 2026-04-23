@@ -185,7 +185,7 @@ Three escalation levels:
 ## 10. Privacy / redaction
 
 - **Repo allowlist.** Ducky reads only repos the user opts in. New repos require explicit "watch this project" onboarding; unknown repos are invisible.
-- **Secret redaction pre-send.** `gitleaks`/`trufflehog` patterns run on any diff/file content before it goes to the thinking brain; matches redacted inline.
+- **Secret redaction pre-send (landed 2026-04-23).** `gitleaks stdin` runs over every specialist-assembled prompt before it reaches `brain.query()`; matches are spliced with `[REDACTED:<RuleID>]` and surface as `redacted:<rule_id>` flags on the `SpecialistResponse`. Fail-closed: a broken `gitleaks` install aborts the review with a `redaction-failed` flag — no brain call fires. Shared helper: `daemon/src/reachy_ducky_daemon/specialists/redaction.py`. Gitleaks config precedence mirrors lefthook's pre-commit hook, so "what's a secret" stays unified across commit-time and brain-time. See `docs/plans/2026-04-23-secret-redaction-specialists.md` and closed issue #50.
 - **Hard blocklist by default:** `.env*`, `*.pem`, `*.key`, `id_rsa*`, `secrets/**`, `credentials*`. Extensible per-project.
 - **Transcript ingestion (phase D)**: opt-in per project, never default.
 
