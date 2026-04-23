@@ -145,33 +145,47 @@ import numpy as np
 import pytest
 
 from reachy_mini import ReachyMini
+from reachy_mini.media.media_manager import MediaManager
 
 
-def test_reachy_mini_media_exposes_audio_sample_methods() -> None:
-    """ReachyMini.media has the two audio methods our impls call.
+def test_reachy_mini_media_property_exists() -> None:
+    """``ReachyMini.media`` property is declared at class scope.
 
-    Class-level only — does not construct a ``ReachyMini`` instance, so
-    it runs in the default tier without needing a live robot.
+    Class-level only — ``media`` is a ``@property`` so the descriptor lives
+    on the class even without instantiation. Proves the access path
+    ``mini.media.<method>`` is still valid without needing a live robot.
     """
-    assert hasattr(ReachyMini, "media") or "media" in getattr(ReachyMini, "__annotations__", {}), (
-        "ReachyMini.media attribute missing — can't source or sink frames"
+    assert hasattr(ReachyMini, "media"), (
+        "ReachyMini.media property missing — can't source or sink frames"
     )
-    # Deeper introspection of .media (get_audio_sample / push_audio_sample
-    # attribute existence) requires an instance; those checks live in the
-    # @pytest.mark.hardware tests below.
 
 
-@pytest.mark.hardware
-def test_reachy_mini_media_audio_methods_present_on_instance() -> None:
-    """On a live robot, ``mini.media`` exposes both audio methods."""
-    mini = ReachyMini()
-    assert hasattr(mini.media, "get_audio_sample"), (
-        "ReachyMini.media.get_audio_sample missing — ReachyMicSource "
-        "can't source frames"
+def test_media_manager_exposes_audio_sample_methods() -> None:
+    """``MediaManager`` class declares the two audio methods our impls call.
+
+    This is the critical default-tier drift guard: ``mini.media`` returns
+    a ``MediaManager`` instance, so renames on ``MediaManager.get_audio_sample`` /
+    ``push_audio_sample`` would silently break our ``ReachyMicSource`` /
+    ``ReachySpeakerSink`` implementations. Introspecting the class directly
+    (not an instance) keeps this in the default tier with no live-robot
+    requirement — catches the rename in CI before it hits hardware.
+    """
+    assert hasattr(MediaManager, "get_audio_sample"), (
+        "MediaManager.get_audio_sample missing — ReachyMicSource can't "
+        "source frames"
     )
-    assert hasattr(mini.media, "push_audio_sample"), (
-        "ReachyMini.media.push_audio_sample missing — ReachySpeakerSink "
-        "can't sink frames"
+    assert hasattr(MediaManager, "push_audio_sample"), (
+        "MediaManager.push_audio_sample missing — ReachySpeakerSink can't "
+        "sink frames"
+    )
+    # Also pin the parameterless call shape of get_audio_sample — we
+    # rely on calling it with no arguments. Signature check is class-
+    # level safe (``inspect.signature`` doesn't need an instance).
+    sig = inspect.signature(MediaManager.get_audio_sample)
+    # self is the only parameter; no caller-supplied args.
+    assert len(sig.parameters) == 1, (
+        f"MediaManager.get_audio_sample unexpectedly accepts "
+        f"{list(sig.parameters)}; ReachyMicSource calls it with no args"
     )
 
 
@@ -216,7 +230,11 @@ uv run pytest app/tests/test_sdk_audio_contract.py -v                 # class-le
 uv run pytest -m hardware app/tests/test_sdk_audio_contract.py -v     # instance-level (live robot)
 ```
 
-Expected on any dev machine (no live robot): the first command passes the class-level test; the second exits with "no tests ran" unless the marker filter matches. Expected on a machine with a reachable Reachy Mini: one of four outcomes for the hardware-marked tests:
+Expected on any dev machine:
+- **First command** (default tier): both class-level tests pass — they introspect `ReachyMini`'s `media` property and `MediaManager`'s audio-method class surface. No daemon, no live robot, catches upstream renames in CI.
+- **Second command** (`-m hardware`): collects the four hardware-marked tests in the module. Without a reachable Reachy Mini they fail at `ReachyMini()` construction (typically `ConnectionRefusedError`) — that's the documented "honest failure" policy from `testing-standards.md`. Re-run on a machine that can reach the LAN robot (or skip manually until hardware is available).
+
+Expected on a machine with a reachable Reachy Mini: one of four outcomes for the hardware-marked tests:
 1. All pass — pin the contract as-is, move on.
 2. `hasattr` fails — SDK method renamed. **Escalate** (see Step 1).
 3. Buffer assertion fails — SDK returns `None` or empty. Check if the mic needs initialization first; update the test to call whatever initialization is required.
