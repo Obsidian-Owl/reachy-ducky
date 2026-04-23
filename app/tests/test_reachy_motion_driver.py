@@ -97,6 +97,22 @@ def test_move_libraries_are_lazy_loaded_on_first_play_move() -> None:
     assert driver._move_libraries is None  # noqa: SLF001
 
 
+def test_play_move_reuses_loaded_libraries_across_calls() -> None:
+    """Second ``play_move`` call reuses the libraries loaded on the first
+    — no re-import, no re-construction. Catches regressions where a
+    refactor accidentally resets ``_move_libraries`` per call."""
+    mini = MagicMock()
+    driver = ReachyMotionDriver(mini)
+    lib = _FakeMoveLibrary({"a": _FakeMove(), "b": _FakeMove()})
+    driver._move_libraries = [lib]  # noqa: SLF001 — test injection seam
+
+    driver.play_move("a")
+    libs_after_first = driver._move_libraries  # noqa: SLF001
+
+    driver.play_move("b")
+    assert driver._move_libraries is libs_after_first  # noqa: SLF001
+
+
 def test_go_to_sleep_and_wake_up_bypass_move_resolution() -> None:
     """``goto_sleep`` and ``wake_up`` forward directly to the SDK — they are
     NOT move-library lookups. Touching _move_libraries stays lazy."""

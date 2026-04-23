@@ -74,6 +74,10 @@ class ReachyMotionDriver(MotionDriver):
     default HuggingFace datasets (emotions + dances libraries). Libraries
     are lazy-loaded on the first ``play_move`` call so tests that only
     exercise ``go_to_sleep`` / ``wake_up`` don't trigger HF downloads.
+    Emotions library is searched first; same-name collisions resolve to
+    the emotions version (important because the state-machine's move
+    names — ``neutral``, ``listening``, ``thinking`` — come from the
+    emotions library).
     """
 
     def __init__(self, mini: object) -> None:
@@ -91,6 +95,18 @@ class ReachyMotionDriver(MotionDriver):
         Searches emotions library first, falls through to dances library.
         Raises ``ValueError`` with a clear message if the name is in
         neither — the SDK's own ``play_move`` would fail less helpfully.
+
+        The ``except ValueError`` narrows on miss by-contract with the
+        current SDK — ``RecordedMoves.get()`` raises ``ValueError`` only
+        when the name isn't in the dataset. Revisit this catch when
+        bumping ``reachy-mini`` (tracked in #60) if a future version
+        adds input validation that also raises ``ValueError``.
+
+        Dataset loading failures (HF cache corruption, network errors
+        in ``snapshot_download``) propagate from the FIRST
+        ``RecordedMoves(...)`` call and are NOT caught — those are
+        single-root-cause environment problems, not per-dataset
+        conditions. Silently falling through would hide the real issue.
         """
         if self._move_libraries is None:
             from reachy_mini.motion.recorded_move import (  # type: ignore[import-untyped]
@@ -106,7 +122,11 @@ class ReachyMotionDriver(MotionDriver):
                 return lib.get(name)  # type: ignore[attr-defined]
             except ValueError:
                 continue
-        raise ValueError(f"Move '{name}' not found in emotions or dances library")
+        raise ValueError(
+            f"Move '{name}' not found in emotions library "
+            f"(pollen-robotics/reachy-mini-emotions-library) or dances "
+            f"library (pollen-robotics/reachy-mini-dances-library)"
+        )
 
     def play_move(self, name: str) -> None:
         move = self._get_move(name)
