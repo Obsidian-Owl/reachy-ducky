@@ -7,6 +7,7 @@ binary. Mirrors the shape of ``test_specialist_pr_reviewer.py``.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from unittest.mock import patch
 
@@ -249,3 +250,41 @@ def test_redact_splices_without_shifting_earlier_findings() -> None:
     # Bookend words still present and in order.
     assert out.index("alpha") < out.index("[REDACTED:rule-a]") < out.index("beta")
     assert out.index("beta") < out.index("[REDACTED:rule-b]") < out.index("end")
+
+
+# ---------------------------------------------------------------------------
+# Integration (gated) — real gitleaks binary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_redact_real_gitleaks_catches_synthetic_pat() -> None:
+    """End-to-end smoke: pipe a synthetic GitHub PAT through real gitleaks.
+
+    Gated on ``REACHY_DUCKY_RUN_INTEGRATION=1`` — the only test in
+    this module that requires the actual binary on PATH. Mirrors the
+    gating pattern from
+    ``test_specialist_pr_reviewer.test_pr_reviewer_live_claude``.
+
+    Uses a concatenated PAT shape so the source file itself stays out
+    of gitleaks' commit-time scan; the runtime value is 40 chars of
+    ``ghp_`` + 36 mixed-case alphanumeric. The 36-char body must have
+    enough entropy (~5.0) to clear gitleaks' ``github-pat`` rule —
+    homogeneous strings like ``"A" * 36`` won't trigger it.
+    """
+    if not os.environ.get("REACHY_DUCKY_RUN_INTEGRATION"):
+        pytest.skip("set REACHY_DUCKY_RUN_INTEGRATION=1 to run")
+
+    # High-entropy mixed-case body (36 chars). Built via concatenation so
+    # the literal in source doesn't match gitleaks' regex.
+    fake_pat = "ghp_" + "xK9Pm2Qw7nL8tRa5VcFgHjKbNdEfShUzMvXy"  # gitleaks:allow
+    synthetic = f"benign preamble\ngithub_pat = {fake_pat}\npostamble line\n"
+
+    redacted, flags = redact(synthetic)
+
+    assert fake_pat not in redacted
+    assert "[REDACTED:github-pat]" in redacted
+    assert "github-pat" in flags
+    # Non-secret content preserved.
+    assert "benign preamble" in redacted
+    assert "postamble line" in redacted
