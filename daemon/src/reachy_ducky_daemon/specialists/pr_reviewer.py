@@ -354,6 +354,10 @@ def _assemble_prompt(
     diff: str,
     comments: list[dict[str, object]],
     check_runs: list[dict[str, object]],
+    *,
+    diff_error: str | None = None,
+    comments_error: str | None = None,
+    check_runs_error: str | None = None,
 ) -> str:
     """Build the review prompt.
 
@@ -363,6 +367,16 @@ def _assemble_prompt(
     begins. Comment entries include author login + file:line so a
     follow-up "tell me about that Augment comment" has anchors the
     brain can ``Read`` directly.
+
+    Fetch-error plumbing: when ``gh`` fails on any of the three
+    secondary surfaces (diff, comments, check-runs), the orchestrator
+    passes the error string through the matching ``*_error`` kwarg.
+    The prompt prepends a ``(diagnostic: ...)`` line inside the
+    affected section so the brain can distinguish "nothing there" from
+    "couldn't see what was there" — silent degradation of fetch errors
+    into empty values was a real correctness risk (brain's risk call
+    could say "safe to merge, no diff" on a PR whose diff we couldn't
+    read).
     """
     parts: list[str] = []
     parts.append(f"PR #{pr.get('number')}: {pr.get('title', '(no title)')}")
@@ -378,10 +392,14 @@ def _assemble_prompt(
     parts.append("")
 
     parts.append("=== DIFF ===")
+    if diff_error is not None:
+        parts.append(f"(diagnostic: {diff_error})")
     parts.append(diff if diff.strip() else "(empty diff)")
     parts.append("")
 
     parts.append("=== REVIEW COMMENTS ===")
+    if comments_error is not None:
+        parts.append(f"(diagnostic: {comments_error})")
     if not comments:
         parts.append("(no line-level review comments)")
     else:
@@ -396,6 +414,8 @@ def _assemble_prompt(
     parts.append("")
 
     parts.append("=== CI / CHECK RUNS ===")
+    if check_runs_error is not None:
+        parts.append(f"(diagnostic: {check_runs_error})")
     if not check_runs:
         parts.append("(no check runs)")
     else:
@@ -492,16 +512,17 @@ class PRReviewer:
                 find_error=meta_err or f"could not fetch PR #{resolved_pr}",
             )
 
-        diff, _diff_err = _fetch_diff(resolved_pr, cwd=self._repo)
-        comments, _c_err = _fetch_review_comments(
+        diff, diff_err = _fetch_diff(resolved_pr, cwd=self._repo)
+        comments, comments_err = _fetch_review_comments(
             owner=self._owner,
             repo=self._repo_name,
             pr_number=resolved_pr,
             cwd=self._repo,
         )
         head_sha = pr_meta.get("headRefOid")
+        check_runs_err: str | None
         if isinstance(head_sha, str) and head_sha:
-            check_runs, _ci_err = _fetch_check_runs(
+            check_runs, check_runs_err = _fetch_check_runs(
                 owner=self._owner,
                 repo=self._repo_name,
                 head_sha=head_sha,
@@ -509,8 +530,20 @@ class PRReviewer:
             )
         else:
             check_runs = []
+            # PR metadata fetched successfully but lacks a head SHA — surface
+            # as a diagnostic so the brain knows CI silence is "we didn't ask",
+            # not "no CI configured".
+            check_runs_err = "PR metadata did not include headRefOid — check-runs not fetched"
 
-        prompt = _assemble_prompt(pr=pr_meta, diff=diff, comments=comments, check_runs=check_runs)
+        prompt = _assemble_prompt(
+            pr=pr_meta,
+            diff=diff,
+            comments=comments,
+            check_runs=check_runs,
+            diff_error=diff_err,
+            comments_error=comments_err,
+            check_runs_error=check_runs_err,
+        )
         flags = _derive_flags(pr=pr_meta, comments=comments, check_runs=check_runs)
         brain_resp = await self._brain.query(BrainRequest(user_utterance=prompt))
         return SpecialistResponse(name=_SPECIALIST_NAME, summary=brain_resp.text, flags=flags)

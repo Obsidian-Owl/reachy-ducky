@@ -281,6 +281,37 @@ def test_pr_reviewer_endpoint_missing_github_repo_returns_400(tmp_path: Path) ->
     assert "github_repo" in r.json()["detail"]
 
 
+def test_pr_reviewer_endpoint_400_does_not_build_brain(tmp_path: Path) -> None:
+    """The 400 "missing github_repo" path must not trigger a brain build.
+
+    The route should validate the Project *before* calling ``brain_for``
+    so misconfiguration errors stay cheap and side-effect-free. Uses a
+    counting factory to assert zero invocations on the rejection path.
+    """
+    repo = _init_repo(tmp_path / "repo")
+    build_count = 0
+
+    def _counting_factory(_: Project) -> BrainInterface:
+        nonlocal build_count
+        build_count += 1
+        return MockBrain()
+
+    registry = BrainRegistry(
+        projects=[Project(slug="repo", path=repo, github_repo=None, primary=True)],
+        build_brain=_counting_factory,
+    )
+    app = create_app(registry=registry, memory_root=tmp_path / "mem")
+    client = TestClient(app)
+
+    r = client.post(
+        "/specialists/pr-reviewer",
+        json={"name": "pr-reviewer", "project_slug": "repo", "pr_number": 42},
+    )
+
+    assert r.status_code == 400
+    assert build_count == 0, "400 path triggered a brain build — validation order is wrong"
+
+
 def test_pr_reviewer_endpoint_response_shape(tmp_path: Path) -> None:
     """Response matches ``SpecialistResponse`` schema exactly — {name, summary, flags}."""
     repo = _init_repo(tmp_path / "repo")

@@ -491,6 +491,84 @@ def test_assemble_prompt_handles_empty_optional_sections() -> None:
     assert "no check" in prompt.lower()
 
 
+def test_assemble_prompt_surfaces_diff_fetch_error() -> None:
+    """Fetch failure on the diff surfaces as a diagnostic, not silent (empty diff).
+
+    An empty diff and a failed diff fetch look identical to the brain if
+    we pass ``diff=""`` with no explanatory context — dangerous for the
+    "risk call" (brain might say "no changes so safe" on a PR whose diff
+    we couldn't read). The diagnostic kwarg lets the brain distinguish.
+    """
+    pr: dict[str, object] = {
+        "number": 1,
+        "title": "t",
+        "body": "",
+        "headRefName": "f",
+        "baseRefName": "main",
+    }
+    prompt = _assemble_prompt(
+        pr=pr,
+        diff="",
+        comments=[],
+        check_runs=[],
+        diff_error="gh pr diff 1 failed: authentication required",
+    )
+    # Diagnostic lands inside the DIFF section so the brain anchors it.
+    diff_section = prompt.split("=== DIFF ===", 1)[1].split("=== REVIEW COMMENTS ===", 1)[0]
+    assert "diagnostic" in diff_section.lower()
+    assert "authentication required" in diff_section
+
+
+def test_assemble_prompt_surfaces_comments_fetch_error() -> None:
+    """Fetch failure on review comments surfaces inside the comments section."""
+    pr: dict[str, object] = {
+        "number": 1,
+        "title": "t",
+        "body": "",
+        "headRefName": "f",
+        "baseRefName": "main",
+    }
+    prompt = _assemble_prompt(
+        pr=pr,
+        diff="",
+        comments=[],
+        check_runs=[],
+        comments_error="gh api /repos/o/r/pulls/1/comments failed: 404 Not Found",
+    )
+    comments_section = prompt.split("=== REVIEW COMMENTS ===", 1)[1].split(
+        "=== CI / CHECK RUNS ===", 1
+    )[0]
+    assert "diagnostic" in comments_section.lower()
+    assert "404 Not Found" in comments_section
+
+
+def test_assemble_prompt_surfaces_check_runs_fetch_error() -> None:
+    """Fetch failure on check-runs surfaces inside the CI section — not silent.
+
+    Silent handling is the correctness hazard Augment flagged: an
+    authentication failure on ``/commits/<sha>/check-runs`` would leave
+    ``check_runs=[]`` and ``_derive_flags`` emits no ``ci-*`` flag at
+    all — menubar shows neutral on a PR whose CI state we didn't see.
+    """
+    pr: dict[str, object] = {
+        "number": 1,
+        "title": "t",
+        "body": "",
+        "headRefName": "f",
+        "baseRefName": "main",
+    }
+    prompt = _assemble_prompt(
+        pr=pr,
+        diff="",
+        comments=[],
+        check_runs=[],
+        check_runs_error="gh api /repos/o/r/commits/abc/check-runs failed: 403",
+    )
+    ci_section = prompt.split("=== CI / CHECK RUNS ===", 1)[1].split("=== TASK ===", 1)[0]
+    assert "diagnostic" in ci_section.lower()
+    assert "403" in ci_section
+
+
 def test_assemble_diagnostic_prompt_explains_no_pr() -> None:
     """Diagnostic prompt names the branch, says no PR, asks brain to investigate."""
     prompt = _assemble_diagnostic_prompt(
@@ -692,6 +770,54 @@ async def test_review_graceful_fail_surfaces_gh_lookup_error(tmp_path: Path) -> 
     assert "no-pr-found" in response.flags
     prompt = brain.calls[0].user_utterance
     assert "authentication required" in prompt
+
+
+@pytest.mark.asyncio
+async def test_review_surfaces_diff_fetch_error_in_prompt(tmp_path: Path) -> None:
+    """Even when PR metadata fetch succeeds, a failed gh pr diff must surface.
+
+    Pins the behaviour Augment called out: fetch errors on diff/comments/
+    CI must not be silently degraded into "empty" values — the brain must
+    see the diagnostic so it can distinguish "nothing there" from
+    "couldn't see what was there."
+    """
+    pr_view = _FIXTURES / "gh_pr_view_happy.json"
+
+    side_effect = _mock_by_argv(
+        {
+            ("gh", "pr", "view"): _ok(pr_view.read_text()),
+            # Diff fetch fails — auth-shaped error from gh.
+            ("gh", "pr", "diff"): subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="authentication required"
+            ),
+            (
+                "gh",
+                "api",
+                "/repos/Obsidian-Owl/reachy-ducky/pulls/42/comments",
+            ): _ok("[]"),
+            (
+                "gh",
+                "api",
+                "/repos/Obsidian-Owl/reachy-ducky/commits/abc123def456/check-runs",
+            ): _ok('{"total_count": 0, "check_runs": []}'),
+        }
+    )
+
+    brain = MockBrain()
+    reviewer = PRReviewer(
+        brain=brain,
+        repo=tmp_path,
+        owner="Obsidian-Owl",
+        repo_name="reachy-ducky",
+    )
+    with patch("subprocess.run", side_effect=side_effect):
+        await reviewer.review(pr_number=42)
+
+    prompt = brain.calls[0].user_utterance
+    assert "authentication required" in prompt, (
+        "fetch error on diff was silently swallowed — brain cannot distinguish "
+        "'no changes' from 'could not read changes'"
+    )
 
 
 # ---------------------------------------------------------------------------

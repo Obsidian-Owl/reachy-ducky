@@ -132,8 +132,12 @@ def create_app(
 
     @app.post("/specialists/pr-reviewer", response_model=SpecialistResponse)
     async def pr_reviewer_route(req: SpecialistRequest) -> SpecialistResponse:
+        # Validate project configuration BEFORE touching the brain factory so
+        # misconfiguration rejections (404 unknown-slug, 400 missing github_repo)
+        # stay cheap and side-effect-free. Brain construction is documented as
+        # pure config assembly today (brain/registry.py), but the invariant
+        # is only as solid as the docstring — order matters if that changes.
         try:
-            brain = registry.brain_for(req.project_slug)
             project = registry.project_for(req.project_slug)
         except KeyError:
             raise HTTPException(
@@ -150,6 +154,7 @@ def create_app(
             )
         # Project.__post_init__ already validated the 'owner/repo' shape.
         owner, repo_name = project.github_repo.split("/", 1)
+        brain = registry.brain_for(req.project_slug)
         return await PRReviewer(
             brain=brain,
             repo=project.path,
