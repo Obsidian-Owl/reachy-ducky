@@ -59,6 +59,7 @@ credentials*
 # Local Reachy Ducky runtime
 .reachy-ducky/
 /memory/
+.sim-daemon.pid
 
 # GitNexus local index
 .gitnexus/
