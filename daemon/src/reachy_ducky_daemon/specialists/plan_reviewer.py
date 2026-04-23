@@ -106,10 +106,6 @@ def _capture_diff(repo: Path, branch: str) -> tuple[str, str | None]:
     Both paths are ``check=False``; a git failure becomes a diagnostic
     string in the returned ``error`` rather than a raised exception.
     """
-    # TODO(#3): add test coverage for the merge-base-failure fallback branch
-    # below (feature branch + `main` ref absent). Also prepend a "using
-    # working-tree-vs-HEAD fallback" banner to the returned diff text when
-    # this path engages so the brain can distinguish fallback from primary.
     if branch != "main":
         try:
             proc = _run_git(["diff", "main...HEAD"], cwd=repo)
@@ -133,6 +129,16 @@ def _capture_diff(repo: Path, branch: str) -> tuple[str, str | None]:
         if fallback_err is not None:
             return "", f"{fallback_err}; git diff (fallback) failed: {combined}"
         return "", f"git diff failed: {combined}"
+    # Prepend a banner when we actually fell back from a merge-base diff
+    # (i.e., not the on-main path where fallback_err is None because there
+    # was no merge-base attempt in the first place). Lets the brain tell
+    # 'working-tree diff because on main' from 'working-tree diff because
+    # main ref is absent / merge-base failed'.
+    if fallback_err is not None and fallback.stdout:
+        banner = (
+            "(fallback: using working-tree-vs-HEAD diff; merge-base against main was unavailable)\n"
+        )
+        return banner + fallback.stdout, fallback_err
     return fallback.stdout, fallback_err
 
 

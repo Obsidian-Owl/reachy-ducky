@@ -582,3 +582,39 @@ def test_caps_have_sensible_defaults(tmp_path: Path) -> None:
     reviewer = PlanReviewer(brain=MockBrain(), repo=tmp_path)
     assert reviewer._max_plan_chars == 50_000  # noqa: SLF001
     assert reviewer._max_total_plan_chars == 200_000  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# Merge-base fallback banner (#3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_capture_diff_falls_back_when_main_ref_absent(tmp_path: Path) -> None:
+    """Feature branch but no 'main' ref → fall back to working-tree-vs-HEAD.
+
+    Banner: the fallback diff text starts with a one-line marker telling
+    the brain it came from the fallback path, not the merge-base diff.
+    """
+    # Init with default branch 'feat-alone' instead of 'main'.
+    _run("git", "init", "-b", "feat-alone", cwd=tmp_path)
+    _run("git", "config", "user.email", "test@example.com", cwd=tmp_path)
+    _run("git", "config", "user.name", "Test User", cwd=tmp_path)
+    _run("git", "config", "commit.gpgsign", "false", cwd=tmp_path)
+    (tmp_path / "docs" / "plans").mkdir(parents=True)
+    (tmp_path / "docs" / "plans" / "foo.md").write_text("# Plan Foo\n")
+    _commit(tmp_path, "initial")
+    # Make an uncommitted edit so `git diff` has output.
+    (tmp_path / "docs" / "plans" / "foo.md").write_text("# Plan Foo\nUNCOMMITTED_EDIT\n")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=tmp_path)
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # Fallback engaged — uncommitted edit surfaces.
+    assert "UNCOMMITTED_EDIT" in prompt
+    # Banner line sits at the top of the diff section.
+    diff_section = prompt.split("=== DIFF ===", 1)[1]
+    assert "(fallback:" in diff_section or "fallback:" in diff_section
+    assert "working-tree" in diff_section.lower() or "working tree" in diff_section.lower()
