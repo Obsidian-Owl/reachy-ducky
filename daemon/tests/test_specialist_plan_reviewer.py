@@ -427,6 +427,42 @@ async def test_review_surfaces_unreadable_plan_diagnostic(
 
 
 @pytest.mark.asyncio
+async def test_prompt_has_no_contradiction_when_all_plans_unreadable(
+    tmp_path: Path,
+) -> None:
+    """When every discovered plan is unreadable, the PLANS section must not
+    claim 'no plan or spec files discovered' — that contradicts the
+    UNREADABLE PLANS section which names specific discovered-but-unreadable
+    files.
+    """
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    # Two non-UTF-8 blobs — no readable plan at all.
+    (plans_dir / "bad1.md").write_bytes(b"\xff\xfe\x00\x00not utf-8 one")
+    (plans_dir / "bad2.md").write_bytes(b"\xff\xfe\x00\x00not utf-8 two")
+    _commit(tmp_path, "only-bad-plans")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=tmp_path)
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # Must surface both filenames as unreadable diagnostics.
+    assert "=== UNREADABLE PLANS ===" in prompt
+    assert "bad1.md" in prompt
+    assert "bad2.md" in prompt
+    # Must NOT claim nothing was discovered — that contradicts the list above.
+    assert "no plan or spec files discovered" not in prompt
+    # Must still signal the empty-readable state somehow, pointing to the
+    # UNREADABLE PLANS section.
+    plans_section = prompt.split("=== PLANS ===", 1)[1].split("=== UNREADABLE PLANS ===", 1)[0]
+    assert "no readable plan" in plans_section.lower(), (
+        f"PLANS section should say 'no readable plan...'; got: {plans_section!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_review_omits_unreadable_section_when_all_plans_load(
     tmp_path: Path,
 ) -> None:

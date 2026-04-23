@@ -211,6 +211,8 @@ def _collect_plans(
 def _assemble_plans_block(
     plans: list[tuple[str, str]],
     max_total_chars: int,
+    *,
+    has_unreadable: bool = False,
 ) -> list[str]:
     """Build the ``=== PLANS ===`` section under a total-char budget.
 
@@ -224,14 +226,24 @@ def _assemble_plans_block(
     plan (longer than the total budget) still lands — so the brain
     always gets at least one plan when any exist. Per-file truncation
     in :func:`_collect_plans` bounds the damage in that edge case.
+
+    ``has_unreadable``: when True AND ``plans`` is empty, emits a
+    message that points to the UNREADABLE PLANS section rather than
+    claiming nothing was discovered — the caller has detected that
+    plans exist but all failed to read.
     """
     parts: list[str] = ["=== PLANS ==="]
     if not plans:
-        parts.append(
-            "(no plan or spec files discovered under conventional locations — "
-            "docs/plans/**/*.md, specs/**/*.md, root AGENTS.md/CLAUDE.md/SPEC.md, "
-            "*.plan.md)",
-        )
+        if has_unreadable:
+            parts.append(
+                "(no readable plan or spec files — see UNREADABLE PLANS below)",
+            )
+        else:
+            parts.append(
+                "(no plan or spec files discovered under conventional locations — "
+                "docs/plans/**/*.md, specs/**/*.md, root AGENTS.md/CLAUDE.md/SPEC.md, "
+                "*.plan.md)",
+            )
         return parts
 
     used = 0
@@ -292,7 +304,13 @@ def _assemble_prompt(
         parts.append(f"(diagnostic: {branch_error})")
     parts.append("")
 
-    parts.extend(_assemble_plans_block(plans, max_total_chars))
+    parts.extend(
+        _assemble_plans_block(
+            plans,
+            max_total_chars,
+            has_unreadable=bool(unreadable_plans),
+        ),
+    )
     parts.append("")
 
     if unreadable_plans:
