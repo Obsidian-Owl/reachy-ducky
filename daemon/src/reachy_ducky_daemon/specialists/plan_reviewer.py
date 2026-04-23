@@ -136,34 +136,37 @@ def _capture_diff(repo: Path, branch: str) -> tuple[str, str | None]:
     return fallback.stdout, fallback_err
 
 
-def _collect_plans(repo: Path) -> list[tuple[str, str]]:
-    """Return ``[(relative_path, contents)]`` for every plan file under ``repo``.
+def _collect_plans(
+    repo: Path,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Return ``(readable, unreadable)``.
 
-    Files whose ``read_text`` raises (non-UTF-8, vanished between the
-    ``list_plans`` walk and the read, permission denied, etc.) are
-    skipped silently — the assembled prompt already includes the file's
-    path via neighbouring plan files or via the missing-plans
-    diagnostic, and bubbling the error up would defeat the "no
-    exceptions escape to callers" design constraint.
+    ``readable`` is ``[(rel, content)]`` for every plan that loaded
+    cleanly. ``unreadable`` is ``[(rel, error_string)]`` for every plan
+    ``list_plans`` advertised but ``read_text`` rejected (non-UTF-8,
+    permission-denied, vanished mid-walk, etc.). Both lists are sorted
+    by ``rel``; either may be empty. Mirrors the error-surface pattern
+    used by ``_current_branch`` and ``_capture_diff`` — the diagnostic
+    surfaces to the brain via the ``=== UNREADABLE PLANS ===`` prompt
+    section in ``_assemble_prompt`` rather than being silently swallowed.
     """
-    # TODO(#5): instead of silently skipping, accumulate (rel, error_string)
-    # entries and surface them under an "=== UNREADABLE PLANS ===" prompt
-    # header. Current silent skip is asymmetric with `_capture_diff` and
-    # `_current_branch` (both surface errors as diagnostics).
-    out: list[tuple[str, str]] = []
+    readable: list[tuple[str, str]] = []
+    unreadable: list[tuple[str, str]] = []
     for rel in list_plans(repo):
         try:
             content = (repo / rel).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError) as exc:
+            unreadable.append((rel, f"{type(exc).__name__}: {exc}"))
             continue
-        out.append((rel, content))
-    return out
+        readable.append((rel, content))
+    return readable, unreadable
 
 
 def _assemble_prompt(
     branch: str,
     branch_error: str | None,
     plans: list[tuple[str, str]],
+    unreadable_plans: list[tuple[str, str]],
     diff: str,
     diff_error: str | None,
 ) -> str:
@@ -173,6 +176,12 @@ def _assemble_prompt(
     and uppercase labels) so the brain's attention has fixed landmarks
     between the plan block and the diff block. The directive goes last
     so it sits closest to where the model starts generating.
+
+    When ``unreadable_plans`` is non-empty, a dedicated
+    ``=== UNREADABLE PLANS ===`` section sits between ``=== PLANS ===``
+    and ``=== DIFF ===`` so the brain can tell "file listed but
+    unreadable" from "file never existed". The section is omitted when
+    every plan loads cleanly to avoid cluttering the common case.
 
     TODO(#2): add per-file and total byte caps with a truncation marker.
     Repos with many large plans risk silent context-window overflow at
@@ -198,6 +207,18 @@ def _assemble_prompt(
             parts.append(content.rstrip("\n"))
             parts.append("")
     parts.append("")
+
+    if unreadable_plans:
+        parts.append("=== UNREADABLE PLANS ===")
+        parts.append(
+            "(These files were discovered under conventional locations but "
+            "could not be read. Listed here so you can note them in the "
+            "review — they do not participate in drift analysis.)",
+        )
+        for rel, err in unreadable_plans:
+            parts.append(f"--- {rel} ---")
+            parts.append(f"(diagnostic: {err})")
+        parts.append("")
 
     parts.append("=== DIFF ===")
     if diff_error is not None:
@@ -235,13 +256,14 @@ class PlanReviewer:
         secret leaks.
         """
         branch, branch_error = _current_branch(self._repo)
-        plans = _collect_plans(self._repo)
+        plans, unreadable_plans = _collect_plans(self._repo)
         diff, diff_error = _capture_diff(self._repo, branch)
 
         prompt = _assemble_prompt(
             branch=branch,
             branch_error=branch_error,
             plans=plans,
+            unreadable_plans=unreadable_plans,
             diff=diff,
             diff_error=diff_error,
         )

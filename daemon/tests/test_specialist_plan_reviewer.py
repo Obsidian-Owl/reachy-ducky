@@ -379,3 +379,69 @@ async def test_plan_reviewer_aborts_on_redaction_failure(
     assert "gitleaks binary not found" in response.summary
     assert "abort" in response.summary.lower() or "unavailable" in response.summary.lower()
     assert len(brain.calls) == 0, "brain.query must not fire when redaction fails"
+
+
+# ---------------------------------------------------------------------------
+# Unreadable-plan diagnostic surfacing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_review_surfaces_unreadable_plan_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """A plan file that can't be read (non-UTF-8) surfaces under UNREADABLE PLANS.
+
+    Phase-A parity: _current_branch and _capture_diff already surface
+    errors as '(diagnostic: ...)' in the prompt. _collect_plans
+    previously swallowed OSError/UnicodeDecodeError silently; now the
+    brain sees 'these files exist but we couldn't read them' instead of
+    'these files never existed'.
+    """
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    # A legitimate, readable plan
+    (plans_dir / "ok.md").write_text("# OK Plan\nreadable body\n")
+    # A binary blob that isn't valid UTF-8
+    (plans_dir / "bad.md").write_bytes(b"\xff\xfe\x00\x00not utf-8")
+    _commit(tmp_path, "plans")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=tmp_path)
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # Readable plan still present
+    assert "# OK Plan" in prompt
+    # New section header present
+    assert "=== UNREADABLE PLANS ===" in prompt
+    # Failing file's path is named in the diagnostic
+    unreadable_section = prompt.split("=== UNREADABLE PLANS ===", 1)[1]
+    assert "bad.md" in unreadable_section
+    # Diagnostic mentions the failure mode
+    assert "utf-8" in unreadable_section.lower() or "decode" in unreadable_section.lower()
+
+
+@pytest.mark.asyncio
+async def test_review_omits_unreadable_section_when_all_plans_load(
+    tmp_path: Path,
+) -> None:
+    """When every plan reads cleanly, the UNREADABLE PLANS section is absent.
+
+    Avoids cluttering the prompt with an empty diagnostic header.
+    """
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    (plans_dir / "ok.md").write_text("# OK Plan\nreadable body\n")
+    _commit(tmp_path, "plans")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=tmp_path)
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    assert "# OK Plan" in prompt
+    # No empty section header
+    assert "=== UNREADABLE PLANS ===" not in prompt
