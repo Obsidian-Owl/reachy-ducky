@@ -61,10 +61,11 @@ class MockMotionDriver(MotionDriver):
 class ReachyMotionDriver(MotionDriver):
     """Real driver. Hardware-only.
 
-    ``reachy_mini`` is in ``app/pyproject.toml``'s ``robot`` extra (not
-    default) because its transitive deps break on non-Linux dev machines.
-    On the Reachy itself, users install via ``uv sync --extra robot``.
-    The caller constructs a ``ReachyMini`` and passes it in.
+    ``reachy_mini`` is a plain base dep on ``app/pyproject.toml`` —
+    installs cross-platform, including Mac dev machines (the upstream
+    ``gstreamer-msvc-runtime`` platform-marker bug is patched at the
+    workspace root via ``[tool.uv] dependency-metadata``). The caller
+    constructs a ``ReachyMini`` and passes it in.
     """
 
     def __init__(self, mini: object) -> None:

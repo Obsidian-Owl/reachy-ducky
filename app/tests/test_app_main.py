@@ -1,9 +1,11 @@
 """Tests for :mod:`reachy_ducky_app.main` — the Reachy-side entry point.
 
-These tests do NOT install the ``robot`` extra (``reachy_mini`` /
-``reachy_mini_app``). The module is designed to be importable on Linux CI
-and macOS dev venvs where those hardware-only deps are absent; tests
-verify the construction path via a fake ``reachy_mini`` stand-in.
+``reachy_mini`` is now a plain base dep (see ``app/pyproject.toml`` and
+the workspace-root ``[tool.uv] dependency-metadata`` patch for
+``gstreamer-msvc-runtime``), so it installs on Linux CI and macOS dev
+venvs alike. These tests still avoid constructing a real ``ReachyMini``
+(which would spin up WebRTC media pipelines) and verify the app's
+construction path via a fake ``reachy_mini_app`` stand-in.
 """
 
 from __future__ import annotations
