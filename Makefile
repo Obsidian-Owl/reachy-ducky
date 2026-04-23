@@ -23,12 +23,22 @@ sim-daemon:
 	@sleep 2
 	@echo "reachy-mini-daemon pid $$(cat $(SIM_DAEMON_PIDFILE))"
 
+# Verify the PID still owns a reachy-mini-daemon process before signalling.
+# Stale pidfile + OS-recycled PID is the classic hazard (daemon exits
+# uncleanly, another process inherits the PID, ``make sim-stop`` kills the
+# wrong thing). ``ps -p <pid> -o comm=`` prints the short command name;
+# the ``grep -q`` check refuses to kill unless the name matches.
 sim-stop:
 	@if [ -f "$(SIM_DAEMON_PIDFILE)" ]; then \
 	  pid=$$(cat $(SIM_DAEMON_PIDFILE)); \
 	  if kill -0 "$$pid" 2>/dev/null; then \
-	    echo "Stopping reachy-mini-daemon pid $$pid..."; \
-	    kill "$$pid"; \
+	    comm=$$(ps -p "$$pid" -o comm= 2>/dev/null | tr -d ' '); \
+	    if echo "$$comm" | grep -q reachy-mini-daemon; then \
+	      echo "Stopping reachy-mini-daemon pid $$pid..."; \
+	      kill "$$pid"; \
+	    else \
+	      echo "PID $$pid does not own reachy-mini-daemon (found '$$comm'); leaving alone"; \
+	    fi; \
 	  fi; \
 	  rm -f "$(SIM_DAEMON_PIDFILE)"; \
 	fi

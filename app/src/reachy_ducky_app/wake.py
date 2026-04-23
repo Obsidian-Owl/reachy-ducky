@@ -40,6 +40,16 @@ class WakeDetector(ABC):
 
         Implementations that detect a wake MUST also call
         ``self.event.set()`` so the awaiting ``_run_async`` loop advances.
+
+        **Thread-safety:** ``asyncio.Event.set()`` is not safe to call
+        directly from a non-event-loop thread — doing so can corrupt
+        the Event's internal state. Real ONNX-backed detectors will
+        typically run inference on a dedicated audio thread; such
+        implementations MUST set the event via
+        ``loop.call_soon_threadsafe(self.event.set)`` (where ``loop``
+        is captured at detector construction time). The mock is
+        thread-safe by construction — tests call ``feed_audio``
+        synchronously from the event-loop thread.
         """
 
 

@@ -90,8 +90,19 @@ class ReachyDuckyApp:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                 finally:
+                    # Cancel AND drain the waiter when it's still pending.
+                    # ``cancel()`` alone only marks the task; dropping the
+                    # reference before it observes the cancellation emits
+                    # "Task was destroyed but it is pending" warnings and
+                    # leaves un-retrieved ``CancelledError`` on the event
+                    # loop. Awaiting with suppression is the canonical
+                    # asyncio pattern for one-shot cancel + cleanup.
                     if not wake_waiter.done():
                         wake_waiter.cancel()
+                        try:
+                            await wake_waiter
+                        except asyncio.CancelledError:
+                            pass
                 if stop_event.is_set():
                     break
                 wake.event.clear()
