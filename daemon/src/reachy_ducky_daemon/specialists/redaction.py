@@ -106,8 +106,69 @@ def redact(text: str) -> tuple[str, list[str]]:
             f"gitleaks stdin returned non-list JSON (unexpected shape): {type(parsed).__name__}"
         )
 
-    # Splicing lands in Task 1.2. For now: empty findings → pass through;
-    # non-empty findings → placeholder pass-through (will be replaced).
     if not parsed:
         return text, []
-    return text, []
+
+    # Narrow: only entries with the five required int/str fields are
+    # processed. Anything malformed becomes a RedactionError — we can't
+    # safely splice without trustworthy coordinates, and silently
+    # dropping findings would risk leaving secrets in.
+    findings: list[_Finding] = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            raise RedactionError("gitleaks finding is not an object")
+        try:
+            findings.append(
+                {
+                    "RuleID": str(entry["RuleID"]),
+                    "StartLine": int(entry["StartLine"]),
+                    "EndLine": int(entry["EndLine"]),
+                    "StartColumn": int(entry["StartColumn"]),
+                    "EndColumn": int(entry["EndColumn"]),
+                }
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RedactionError(f"gitleaks finding missing required field: {exc}") from exc
+
+    lines = text.split("\n")
+
+    # Splice from the end so earlier splices don't shift later indices.
+    # Sort by (StartLine, StartColumn) descending.
+    for f in sorted(findings, key=lambda f: (f["StartLine"], f["StartColumn"]), reverse=True):
+        marker = f"[REDACTED:{f['RuleID']}]"
+        start_line_idx = f["StartLine"] - 1
+        end_line_idx = f["EndLine"] - 1
+        start_col_idx = f["StartColumn"] - 1
+        # gitleaks EndColumn is end-inclusive 1-indexed; Python slice
+        # end is exclusive 0-indexed, so EndColumn maps straight through.
+        end_col_idx = f["EndColumn"]
+
+        # Defensive: clamp to the line list we have. Out-of-range indices
+        # mean gitleaks and our line-split disagree about content — fail
+        # closed rather than silently skip.
+        if not (0 <= start_line_idx < len(lines)) or not (0 <= end_line_idx < len(lines)):
+            raise RedactionError(
+                f"gitleaks finding line {f['StartLine']}-{f['EndLine']} "
+                f"out of range (text has {len(lines)} lines)"
+            )
+
+        if start_line_idx == end_line_idx:
+            line = lines[start_line_idx]
+            lines[start_line_idx] = line[:start_col_idx] + marker + line[end_col_idx:]
+        else:
+            # Multi-line: collapse the whole range to a single marker,
+            # preserving any prefix on the start line and any suffix on
+            # the end line. Inner + end lines drop.
+            prefix = lines[start_line_idx][:start_col_idx]
+            suffix = lines[end_line_idx][end_col_idx:]
+            lines[start_line_idx] = prefix + marker + suffix
+            del lines[start_line_idx + 1 : end_line_idx + 1]
+
+    # Dedup rule IDs in original emission order (first occurrence wins).
+    # Iterate the un-sorted findings list so the output flag list reflects
+    # gitleaks' natural top-to-bottom emission.
+    seen: dict[str, None] = {}
+    for f in findings:
+        seen.setdefault(f["RuleID"], None)
+
+    return "\n".join(lines), list(seen.keys())
