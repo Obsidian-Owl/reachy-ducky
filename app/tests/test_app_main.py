@@ -103,6 +103,46 @@ async def test_wake_event_drives_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     assert run_one_turn_calls[0]["project_slug"] is None
 
 
+async def test_stop_wins_when_wake_and_stop_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When wake.event and stop_event both fire before the loop re-checks,
+    stop wins and no additional turn runs.
+
+    Pins the precedence so a future refactor doesn't accidentally let a
+    race cause a turn to fire during shutdown. Pre-setting both events
+    before ``_run_async`` starts is the cleanest way to exercise the
+    decision point: the outer ``while not stop_event.is_set()`` guard
+    must short-circuit regardless of the wake event's state.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    run_one_turn_calls: list[object] = []
+
+    async def _spy_run_one_turn(**kwargs: object) -> None:
+        run_one_turn_calls.append(kwargs)
+
+    injected_wake = MockWakeDetector()
+    injected_wake.event.set()
+
+    monkeypatch.setattr("reachy_ducky_app.main.run_one_turn", _spy_run_one_turn)
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_wake_detector",
+        lambda: injected_wake,
+    )
+
+    app = ReachyDuckyApp()
+    stop = threading.Event()
+    stop.set()
+
+    await asyncio.wait_for(
+        app._run_async(reachy_mini=object(), stop_event=stop),
+        timeout=0.5,
+    )
+
+    assert run_one_turn_calls == []
+
+
 async def test_wake_loop_exits_cleanly_without_firing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -129,7 +169,7 @@ async def test_wake_loop_exits_cleanly_without_firing(
     stop = threading.Event()
 
     async def _stop_soon() -> None:
-        await asyncio.sleep(0.15)  # > the 0.1s stop-bridge tick
+        await asyncio.sleep(0.3)  # 3x the 0.1s stop-bridge tick; margin for loaded CI
         stop.set()
 
     app = ReachyDuckyApp()

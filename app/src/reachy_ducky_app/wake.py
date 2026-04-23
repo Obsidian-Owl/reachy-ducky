@@ -24,6 +24,11 @@ class WakeDetector(ABC):
     (or the future ONNX inference path) sets on a detected wake.
     ``ReachyDuckyApp._run_async`` awaits this event via ``asyncio.wait``
     so the wake loop never busy-polls.
+
+    Constructing a ``WakeDetector`` outside an event loop is safe:
+    Python 3.10+ ``asyncio.Event()`` is loop-agnostic until ``wait()``
+    is called, so ``load_default_wake_detector()`` can run at import or
+    unit-test setup time without an active loop.
     """
 
     def __init__(self) -> None:
@@ -45,6 +50,12 @@ class MockWakeDetector(WakeDetector):
     Pass ``trigger_on_feed=True`` to flip the event (and return True) on
     every ``feed_audio`` call — useful for exercising the event-driven
     loop in unit tests without touching ONNX or hardware.
+
+    **Do NOT use ``trigger_on_feed=True`` in production wiring.**
+    ``_run_async`` calls ``wake.event.clear()`` after each turn, so a
+    continuously-fed detector would re-set the event on every audio
+    frame and starve the rest of the loop (every ``asyncio.wait`` would
+    immediately select the wake branch). It's strictly a test hook.
 
     ``detect_in_text`` is a simple substring check so tests can simulate
     "heard the phrase".
