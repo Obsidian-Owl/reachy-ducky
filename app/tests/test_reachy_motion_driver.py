@@ -1,10 +1,10 @@
 """Unit tests for ``ReachyMotionDriver`` — the concrete SDK-backed driver.
 
-Tests inject a fake ``_move_libraries`` to exercise the resolver logic
-without downloading HuggingFace datasets. Hardware-tier verification
-that the real libraries return the real move names (``neutral``,
-``listening``, ``thinking``) is tracked in the hardware-testing plan
-(#23 / #20); out of scope here.
+Tests inject fakes into ``_emotions_library`` / ``_dances_library`` to
+exercise the resolver logic without downloading HuggingFace datasets.
+Hardware-tier verification that the real libraries return the real move
+names (``neutral``, ``listening``, ``thinking``) is tracked in the
+hardware-testing plan (#23 / #20); out of scope here.
 """
 
 from __future__ import annotations
@@ -39,9 +39,8 @@ def test_play_move_forwards_resolved_move_to_sdk() -> None:
     mini = MagicMock()
     driver = ReachyMotionDriver(mini)
     listening_move = _FakeMove()
-    driver._move_libraries = [  # noqa: SLF001 — test injection seam
-        _FakeMoveLibrary({"listening": listening_move}),
-    ]
+    # Inject emotions; dances stays lazy (None).
+    driver._emotions_library = _FakeMoveLibrary({"listening": listening_move})  # noqa: SLF001
 
     driver.play_move("listening")
 
@@ -49,24 +48,24 @@ def test_play_move_forwards_resolved_move_to_sdk() -> None:
 
 
 def test_play_move_searches_libraries_in_order() -> None:
-    """Missing from library 1 → falls through to library 2; earlier wins on
+    """Emotions tried first; dances only on emotions miss. Earlier wins on
     name collision."""
     mini = MagicMock()
     driver = ReachyMotionDriver(mini)
     emotions_move = _FakeMove()
     dances_move = _FakeMove()
     pirouette_move = _FakeMove()
-    driver._move_libraries = [  # noqa: SLF001
-        _FakeMoveLibrary({"neutral": emotions_move}),
-        _FakeMoveLibrary({"neutral": dances_move, "pirouette": pirouette_move}),
-    ]
+    driver._emotions_library = _FakeMoveLibrary({"neutral": emotions_move})  # noqa: SLF001
+    driver._dances_library = _FakeMoveLibrary(  # noqa: SLF001
+        {"neutral": dances_move, "pirouette": pirouette_move}
+    )
 
-    # Found in the first library — earlier wins on collision.
+    # Found in emotions — earlier wins on collision.
     driver.play_move("neutral")
     mini.play_move.assert_called_once_with(emotions_move)
 
     mini.reset_mock()
-    # Missing from first, found in second.
+    # Missing from emotions, found in dances.
     driver.play_move("pirouette")
     mini.play_move.assert_called_once_with(pirouette_move)
 
@@ -76,10 +75,8 @@ def test_play_move_raises_when_name_missing_from_all_libraries() -> None:
     move. SDK's ``play_move`` is NOT called."""
     mini = MagicMock()
     driver = ReachyMotionDriver(mini)
-    driver._move_libraries = [  # noqa: SLF001
-        _FakeMoveLibrary({"neutral": _FakeMove()}),
-        _FakeMoveLibrary({"wave": _FakeMove()}),
-    ]
+    driver._emotions_library = _FakeMoveLibrary({"neutral": _FakeMove()})  # noqa: SLF001
+    driver._dances_library = _FakeMoveLibrary({"wave": _FakeMove()})  # noqa: SLF001
 
     with pytest.raises(ValueError, match="Move 'sprint' not found"):
         driver.play_move("sprint")
@@ -87,35 +84,36 @@ def test_play_move_raises_when_name_missing_from_all_libraries() -> None:
     mini.play_move.assert_not_called()
 
 
-def test_move_libraries_are_lazy_loaded_on_first_play_move() -> None:
-    """``__init__`` does NOT load HuggingFace datasets — that happens on the
-    first ``play_move`` call. Unit tests that never play a move pay zero
-    SDK / HF cost."""
+def test_libraries_are_lazy_init() -> None:
+    """``__init__`` does NOT load HuggingFace datasets — each library is
+    constructed on its own first access. Unit tests that never play a
+    move pay zero SDK / HF cost."""
     mini = MagicMock()
     driver = ReachyMotionDriver(mini)
-    # Fresh driver: move_libraries is None (not yet loaded).
-    assert driver._move_libraries is None  # noqa: SLF001
+    # Fresh driver: both libraries are None (not yet loaded).
+    assert driver._emotions_library is None  # noqa: SLF001
+    assert driver._dances_library is None  # noqa: SLF001
 
 
 def test_play_move_reuses_loaded_libraries_across_calls() -> None:
-    """Second ``play_move`` call reuses the libraries loaded on the first
+    """Second ``play_move`` call reuses the library loaded on the first
     — no re-import, no re-construction. Catches regressions where a
-    refactor accidentally resets ``_move_libraries`` per call."""
+    refactor accidentally resets the library attr per call."""
     mini = MagicMock()
     driver = ReachyMotionDriver(mini)
     lib = _FakeMoveLibrary({"a": _FakeMove(), "b": _FakeMove()})
-    driver._move_libraries = [lib]  # noqa: SLF001 — test injection seam
+    driver._emotions_library = lib  # noqa: SLF001 — test injection seam
 
     driver.play_move("a")
-    libs_after_first = driver._move_libraries  # noqa: SLF001
+    lib_after_first = driver._emotions_library  # noqa: SLF001
 
     driver.play_move("b")
-    assert driver._move_libraries is libs_after_first  # noqa: SLF001
+    assert driver._emotions_library is lib_after_first  # noqa: SLF001
 
 
 def test_go_to_sleep_and_wake_up_bypass_move_resolution() -> None:
     """``goto_sleep`` and ``wake_up`` forward directly to the SDK — they are
-    NOT move-library lookups. Touching _move_libraries stays lazy."""
+    NOT move-library lookups. Library attrs stay lazy (both None)."""
     mini = MagicMock()
     driver = ReachyMotionDriver(mini)
 
@@ -126,4 +124,26 @@ def test_go_to_sleep_and_wake_up_bypass_move_resolution() -> None:
     mini.wake_up.assert_called_once()
 
     # Move libraries untouched — no HF download triggered.
-    assert driver._move_libraries is None  # noqa: SLF001
+    assert driver._emotions_library is None  # noqa: SLF001
+    assert driver._dances_library is None  # noqa: SLF001
+
+
+def test_emotions_hit_does_not_load_dances() -> None:
+    """A successful emotions lookup must not touch the dances library.
+
+    This is the partial-cache resilience property (Codex PR #67): users
+    with emotions cached but dances unavailable (no network + cache
+    miss) must still be able to play emotions moves. Verifies dances
+    library construction is NOT triggered when emotions has the move.
+    """
+    mini = MagicMock()
+    driver = ReachyMotionDriver(mini)
+    emotions_move = _FakeMove()
+    driver._emotions_library = _FakeMoveLibrary({"neutral": emotions_move})  # noqa: SLF001
+    # _dances_library intentionally left None — mimicking dances unavailable.
+
+    driver.play_move("neutral")
+
+    mini.play_move.assert_called_once_with(emotions_move)
+    # Dances library was never touched.
+    assert driver._dances_library is None  # noqa: SLF001

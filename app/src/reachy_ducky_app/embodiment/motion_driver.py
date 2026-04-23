@@ -72,56 +72,68 @@ class ReachyMotionDriver(MotionDriver):
     Named moves (``"neutral"``, ``"listening"``, etc.) are resolved to
     SDK ``Move`` objects via ``RecordedMoves`` — the SDK ships two
     default HuggingFace datasets (emotions + dances libraries). Libraries
-    are lazy-loaded on the first ``play_move`` call so tests that only
-    exercise ``go_to_sleep`` / ``wake_up`` don't trigger HF downloads.
-    Emotions library is searched first; same-name collisions resolve to
-    the emotions version (important because the state-machine's move
-    names — ``neutral``, ``listening``, ``thinking`` — come from the
-    emotions library).
+    are lazy-loaded **per-library**: emotions on the first ``play_move``
+    call, dances only if that call misses emotions. Partial-cache
+    scenarios (emotions cached, dances unavailable) don't break
+    emotion-library moves. Emotions library is searched first; same-name
+    collisions resolve to the emotions version (important because the
+    state-machine's move names — ``neutral``, ``listening``,
+    ``thinking`` — come from the emotions library).
     """
 
     def __init__(self, mini: object) -> None:
         # Typed as object — the concrete type comes from reachy_mini which
         # may not be installed on a dev machine. Callers pass a ReachyMini.
         self._mini = mini
-        # Lazy: resolved on first play_move() call via _get_move. Tests
-        # inject a fake list here; production code triggers HF download
-        # on first access (cached to disk for subsequent sessions).
-        self._move_libraries: list[object] | None = None
+        # Per-library lazy: each dataset constructed on its own first
+        # access. Tests inject directly into these attrs; production code
+        # triggers HF download on first access (cached for later sessions).
+        self._emotions_library: object | None = None
+        self._dances_library: object | None = None
+
+    def _load_emotions_library(self) -> object:
+        if self._emotions_library is None:
+            from reachy_mini.motion.recorded_move import (  # type: ignore[import-untyped]
+                RecordedMoves,
+            )
+
+            self._emotions_library = RecordedMoves("pollen-robotics/reachy-mini-emotions-library")
+        return self._emotions_library
+
+    def _load_dances_library(self) -> object:
+        if self._dances_library is None:
+            from reachy_mini.motion.recorded_move import RecordedMoves
+
+            self._dances_library = RecordedMoves("pollen-robotics/reachy-mini-dances-library")
+        return self._dances_library
 
     def _get_move(self, name: str) -> object:
         """Resolve ``name`` to an SDK ``Move`` via RecordedMoves libraries.
 
-        Searches emotions library first, falls through to dances library.
-        Raises ``ValueError`` with a clear message if the name is in
-        neither — the SDK's own ``play_move`` would fail less helpfully.
+        Emotions library is tried first (it's the critical path — the
+        state-machine's move names ``neutral`` / ``listening`` /
+        ``thinking`` all live here). Dances library is only constructed
+        on an emotions miss, so users with a partial cache (emotions
+        cached but dances unavailable / offline) can still play emotions
+        moves. If emotions itself fails to construct (import error, HF
+        cache corrupt, network error), that error propagates — it is a
+        real environment problem and silent fall-through to dances would
+        hide it.
 
         The ``except ValueError`` narrows on miss by-contract with the
         current SDK — ``RecordedMoves.get()`` raises ``ValueError`` only
         when the name isn't in the dataset. Revisit this catch when
         bumping ``reachy-mini`` (tracked in #60) if a future version
         adds input validation that also raises ``ValueError``.
-
-        Dataset loading failures (HF cache corruption, network errors
-        in ``snapshot_download``) propagate from the FIRST
-        ``RecordedMoves(...)`` call and are NOT caught — those are
-        single-root-cause environment problems, not per-dataset
-        conditions. Silently falling through would hide the real issue.
         """
-        if self._move_libraries is None:
-            from reachy_mini.motion.recorded_move import (  # type: ignore[import-untyped]
-                RecordedMoves,
-            )
-
-            self._move_libraries = [
-                RecordedMoves("pollen-robotics/reachy-mini-emotions-library"),
-                RecordedMoves("pollen-robotics/reachy-mini-dances-library"),
-            ]
-        for lib in self._move_libraries:
-            try:
-                return lib.get(name)  # type: ignore[attr-defined]
-            except ValueError:
-                continue
+        try:
+            return self._load_emotions_library().get(name)  # type: ignore[attr-defined]
+        except ValueError:
+            pass  # emotions miss; fall through to dances
+        try:
+            return self._load_dances_library().get(name)  # type: ignore[attr-defined]
+        except ValueError:
+            pass
         raise ValueError(
             f"Move '{name}' not found in emotions library "
             f"(pollen-robotics/reachy-mini-emotions-library) or dances "
