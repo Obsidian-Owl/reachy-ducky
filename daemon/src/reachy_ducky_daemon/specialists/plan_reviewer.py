@@ -216,11 +216,17 @@ def _assemble_plans_block(
 ) -> list[str]:
     """Build the ``=== PLANS ===`` section under a total-char budget.
 
-    Concatenates plan bodies in order; once the cumulative body length
-    would exceed ``max_total_chars`` (after at least one plan has
-    landed), appends a single ``[... N plan(s) omitted ...]`` marker
-    (``plan`` / ``plans`` grammatically matched to ``N``) and stops.
-    The ``(no plans)`` branch is unchanged.
+    Concatenates plan blocks (``--- rel ---`` header + body + trailing
+    separator) in order; once the cumulative block length would exceed
+    ``max_total_chars`` (after at least one plan has landed), appends a
+    single ``[... N plan(s) omitted ...]`` marker (``plan`` / ``plans``
+    grammatically matched to ``N``) and stops. The ``(no plans)``
+    branch is unchanged.
+
+    The budget measures the rendered block — header + body + separator
+    — so the char count matches what actually flows into the prompt,
+    not just the plan body. This is a small (~40 chars per plan)
+    overhead but honest about what consumes the brain's context.
 
     The "at least one plan included" guard means a single oversized
     plan (longer than the total budget) still lands — so the brain
@@ -257,7 +263,7 @@ def _assemble_plans_block(
             remaining = len(plans) - included
             plan_word = "plan" if remaining == 1 else "plans"
             parts.append(
-                f"[... {remaining} {plan_word} omitted: total body "
+                f"[... {remaining} {plan_word} omitted: total plans-block "
                 f"budget of {max_total_chars} chars exhausted ...]",
             )
             break
