@@ -479,7 +479,11 @@ class PRReviewer:
       actionable explanation rather than a review-of-nothing.
 
     Exactly one ``brain.query()`` call fires per :meth:`review` invocation
-    regardless of which path is taken.
+    *when redaction succeeds*. A :class:`RedactionError` from the pre-brain
+    redaction step (design doc §10) short-circuits to a fail-closed
+    ``SpecialistResponse`` with a ``redaction-failed`` flag and no brain
+    call — see :meth:`_query_with_redaction`. Every other code path goes
+    through the brain exactly once.
     """
 
     def __init__(
@@ -585,7 +589,7 @@ class PRReviewer:
         state we determined without the brain.
         """
         try:
-            redacted, rule_ids = redact(prompt)
+            redacted, rule_ids = redact(prompt, cwd=self._repo)
         except RedactionError as exc:
             return SpecialistResponse(
                 name=_SPECIALIST_NAME,

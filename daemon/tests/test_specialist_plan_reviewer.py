@@ -342,7 +342,9 @@ async def test_plan_reviewer_redacts_prompt_before_brain_query(
     brain = MockBrain()
     reviewer = PlanReviewer(brain=brain, repo=repo_with_plan_and_drift)
 
-    def _fake_redact(text: str) -> tuple[str, list[str]]:
+    def _fake_redact(text: str, *, cwd: Path) -> tuple[str, list[str]]:
+        assert cwd == repo_with_plan_and_drift
+
         return text.replace("sensitive token here", "[REDACTED:fake-rule]"), ["fake-rule"]
 
     with patch(

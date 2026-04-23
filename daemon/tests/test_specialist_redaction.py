@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -34,19 +35,19 @@ def test_gitleaks_timeout_matches_gh_timeout_precedent() -> None:
     assert _GITLEAKS_TIMEOUT_SECONDS == 30.0
 
 
-def test_redact_passes_clean_text_through_unchanged() -> None:
+def test_redact_passes_clean_text_through_unchanged(tmp_path: Path) -> None:
     """Empty JSON findings → input text unchanged, empty flag list."""
     with patch("subprocess.run", return_value=_ok("[]")):
-        out, flags = redact("just benign text\nno secrets here\n")
+        out, flags = redact("just benign text\nno secrets here\n", cwd=tmp_path)
 
     assert out == "just benign text\nno secrets here\n"
     assert flags == []
 
 
-def test_redact_invokes_gitleaks_stdin_with_expected_flags() -> None:
-    """Argv contract: gitleaks stdin with our flag set."""
+def test_redact_invokes_gitleaks_stdin_with_expected_flags(tmp_path: Path) -> None:
+    """Argv + kwargs contract: gitleaks stdin with our flag set, cwd threaded through."""
     with patch("subprocess.run", return_value=_ok("[]")) as m:
-        redact("anything")
+        redact("anything", cwd=tmp_path)
 
     argv = m.call_args.args[0]
     assert argv[:2] == ["gitleaks", "stdin"]
@@ -65,57 +66,60 @@ def test_redact_invokes_gitleaks_stdin_with_expected_flags() -> None:
     assert call_kwargs["timeout"] == _GITLEAKS_TIMEOUT_SECONDS
     # Input is piped via stdin.
     assert call_kwargs["input"] == "anything"
+    # cwd is threaded through so gitleaks runs in the project dir and
+    # picks up any repo-local .gitleaks.toml (mirrors lefthook).
+    assert call_kwargs["cwd"] == tmp_path
 
 
-def test_redact_raises_on_missing_binary() -> None:
+def test_redact_raises_on_missing_binary(tmp_path: Path) -> None:
     """FileNotFoundError from subprocess (binary missing) → RedactionError."""
     with patch("subprocess.run", side_effect=FileNotFoundError("gitleaks")):
         with pytest.raises(RedactionError, match="gitleaks"):
-            redact("anything")
+            redact("anything", cwd=tmp_path)
 
 
-def test_redact_raises_on_timeout() -> None:
+def test_redact_raises_on_timeout(tmp_path: Path) -> None:
     """TimeoutExpired → RedactionError with 'timeout' in the message."""
     with patch(
         "subprocess.run",
         side_effect=subprocess.TimeoutExpired(cmd="gitleaks", timeout=30.0),
     ):
         with pytest.raises(RedactionError, match="timeout"):
-            redact("anything")
+            redact("anything", cwd=tmp_path)
 
 
-def test_redact_raises_on_non_zero_exit() -> None:
+def test_redact_raises_on_non_zero_exit(tmp_path: Path) -> None:
     """Non-zero exit (gitleaks crashed) → RedactionError with stderr in message."""
     bad = subprocess.CompletedProcess(
         args=[], returncode=1, stdout="", stderr="gitleaks: fatal: bad config"
     )
     with patch("subprocess.run", return_value=bad):
         with pytest.raises(RedactionError, match="fatal: bad config"):
-            redact("anything")
+            redact("anything", cwd=tmp_path)
 
 
-def test_redact_raises_on_malformed_json() -> None:
+def test_redact_raises_on_malformed_json(tmp_path: Path) -> None:
     """Malformed JSON on stdout → RedactionError."""
     with patch("subprocess.run", return_value=_ok("not json")):
         with pytest.raises(RedactionError, match="JSON"):
-            redact("anything")
+            redact("anything", cwd=tmp_path)
 
 
-def test_redact_raises_on_non_list_json() -> None:
+def test_redact_raises_on_non_list_json(tmp_path: Path) -> None:
     """Unexpected JSON shape (object instead of list) → RedactionError."""
     with patch("subprocess.run", return_value=_ok('{"oops": true}')):
         with pytest.raises(RedactionError, match="list"):
-            redact("anything")
+            redact("anything", cwd=tmp_path)
 
 
-def test_redact_raises_on_generic_subprocess_error() -> None:
+def test_redact_raises_on_generic_subprocess_error(tmp_path: Path) -> None:
     """OSError / generic SubprocessError → RedactionError (not a crash)."""
     with patch("subprocess.run", side_effect=OSError("permission denied")):
         with pytest.raises(RedactionError, match="subprocess failed"):
-            redact("anything")
+            redact("anything", cwd=tmp_path)
 
 
-def test_redact_raises_on_non_dict_finding_entry() -> None:
+def test_redact_raises_on_non_dict_finding_entry(tmp_path: Path) -> None:
     """JSON list entry that isn't an object → RedactionError (fail closed).
 
     Silently dropping malformed findings could leave secrets in the
@@ -123,18 +127,18 @@ def test_redact_raises_on_non_dict_finding_entry() -> None:
     """
     with patch("subprocess.run", return_value=_ok('["not a dict"]')):
         with pytest.raises(RedactionError, match="not an object"):
-            redact("anything")
+            redact("anything", cwd=tmp_path)
 
 
-def test_redact_raises_on_finding_missing_required_field() -> None:
+def test_redact_raises_on_finding_missing_required_field(tmp_path: Path) -> None:
     """Finding object missing RuleID/StartLine/etc. → RedactionError."""
     incomplete = '[{"RuleID": "github-pat", "StartLine": 1}]'
     with patch("subprocess.run", return_value=_ok(incomplete)):
         with pytest.raises(RedactionError, match="missing required field"):
-            redact("anything")
+            redact("anything", cwd=tmp_path)
 
 
-def test_redact_raises_on_finding_out_of_range() -> None:
+def test_redact_raises_on_finding_out_of_range(tmp_path: Path) -> None:
     """Finding coords beyond the parsed line count → RedactionError (fail closed).
 
     gitleaks and our ``text.split('\\n')`` disagreeing about line structure
@@ -147,7 +151,44 @@ def test_redact_raises_on_finding_out_of_range() -> None:
     )
     with patch("subprocess.run", return_value=_ok(findings_out_of_range)):
         with pytest.raises(RedactionError, match="out of range"):
-            redact("short input")
+            redact("short input", cwd=tmp_path)
+
+
+def test_redact_raises_on_non_positive_start_column(tmp_path: Path) -> None:
+    """StartColumn ≤ 0 → RedactionError (Python slicing with negatives silently wraps)."""
+    bad = '[{"RuleID": "x", "StartLine": 1, "EndLine": 1, "StartColumn": 0, "EndColumn": 5}]'
+    with patch("subprocess.run", return_value=_ok(bad)):
+        with pytest.raises(RedactionError, match="invalid column range"):
+            redact("short input", cwd=tmp_path)
+
+
+def test_redact_raises_on_end_before_start(tmp_path: Path) -> None:
+    """EndColumn < StartColumn → RedactionError (would splice the wrong range)."""
+    bad = '[{"RuleID": "x", "StartLine": 1, "EndLine": 1, "StartColumn": 8, "EndColumn": 3}]'
+    with patch("subprocess.run", return_value=_ok(bad)):
+        with pytest.raises(RedactionError, match="invalid column range"):
+            redact("short input", cwd=tmp_path)
+
+
+def test_redact_raises_on_end_column_past_line_length(tmp_path: Path) -> None:
+    """EndColumn past line length → RedactionError.
+
+    Silent Python slice clamping would leave a partial secret behind;
+    fail closed instead.
+    """
+    # "short" is 5 chars; EndColumn 999 would clamp silently if we didn't validate.
+    bad = '[{"RuleID": "x", "StartLine": 1, "EndLine": 1, "StartColumn": 1, "EndColumn": 999}]'
+    with patch("subprocess.run", return_value=_ok(bad)):
+        with pytest.raises(RedactionError, match="exceeds line"):
+            redact("short", cwd=tmp_path)
+
+
+def test_redact_raises_on_multiline_start_column_past_line_length(tmp_path: Path) -> None:
+    """Multi-line finding with StartColumn past start-line length → RedactionError."""
+    bad = '[{"RuleID": "x", "StartLine": 1, "EndLine": 2, "StartColumn": 999, "EndColumn": 1}]'
+    with patch("subprocess.run", return_value=_ok(bad)):
+        with pytest.raises(RedactionError, match="StartColumn"):
+            redact("short\nlines here\n", cwd=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +203,7 @@ def _finding_json(findings: list[dict[str, object]]) -> str:
     return _json.dumps(findings)
 
 
-def test_redact_splices_single_finding() -> None:
+def test_redact_splices_single_finding(tmp_path: Path) -> None:
     """One github-pat → marker replaces the match, rule id returned.
 
     Concatenation form keeps the source file out of lefthook's
@@ -181,7 +222,7 @@ def test_redact_splices_single_finding() -> None:
         }
     ]
     with patch("subprocess.run", return_value=_ok(_finding_json(findings))):
-        out, flags = redact(input_text)
+        out, flags = redact(input_text, cwd=tmp_path)
 
     # The shape-matching "token" built by concatenation above must be gone.
     assert ("ghp_" + ("x" * 36)) not in out  # gitleaks:allow
@@ -189,7 +230,7 @@ def test_redact_splices_single_finding() -> None:
     assert flags == ["github-pat"]
 
 
-def test_redact_deduplicates_same_rule() -> None:
+def test_redact_deduplicates_same_rule(tmp_path: Path) -> None:
     """Three github-pat findings on separate lines → three splices, one flag entry."""
     input_text = (
         "a = ghp_" + ("a" * 36) + "\n"  # gitleaks:allow
@@ -207,13 +248,13 @@ def test_redact_deduplicates_same_rule() -> None:
         for i in (1, 2, 3)
     ]
     with patch("subprocess.run", return_value=_ok(_finding_json(findings))):
-        out, flags = redact(input_text)
+        out, flags = redact(input_text, cwd=tmp_path)
 
     assert out.count("[REDACTED:github-pat]") == 3
     assert flags == ["github-pat"]
 
 
-def test_redact_preserves_rule_order_across_types() -> None:
+def test_redact_preserves_rule_order_across_types(tmp_path: Path) -> None:
     """Multiple distinct rules → flag list preserves first-occurrence order."""
     input_text = "line1 with github\nline2 with aws\n"
     findings = [
@@ -233,12 +274,12 @@ def test_redact_preserves_rule_order_across_types() -> None:
         },
     ]
     with patch("subprocess.run", return_value=_ok(_finding_json(findings))):
-        _, flags = redact(input_text)
+        _, flags = redact(input_text, cwd=tmp_path)
 
     assert flags == ["github-pat", "aws-access-key"]
 
 
-def test_redact_collapses_multi_line_finding_to_single_marker() -> None:
+def test_redact_collapses_multi_line_finding_to_single_marker(tmp_path: Path) -> None:
     """Multi-line finding → one marker replaces the entire range.
 
     Uses generic placeholder lines rather than a real-looking private
@@ -263,7 +304,7 @@ def test_redact_collapses_multi_line_finding_to_single_marker() -> None:
         }
     ]
     with patch("subprocess.run", return_value=_ok(_finding_json(findings))):
-        out, flags = redact(input_text)
+        out, flags = redact(input_text, cwd=tmp_path)
 
     assert "PLACEHOLDER_LINE_1" not in out
     assert "PLACEHOLDER_LINE_2_WITH_KEY_MATERIAL" not in out
@@ -275,7 +316,7 @@ def test_redact_collapses_multi_line_finding_to_single_marker() -> None:
     assert flags == ["private-key"]
 
 
-def test_redact_splices_without_shifting_earlier_findings() -> None:
+def test_redact_splices_without_shifting_earlier_findings(tmp_path: Path) -> None:
     """Two findings on the same line: marker for the later one doesn't shift the earlier."""
     input_text = "alpha AAAAAAAA beta BBBBBBBB end\n"
     findings = [
@@ -283,7 +324,7 @@ def test_redact_splices_without_shifting_earlier_findings() -> None:
         {"RuleID": "rule-b", "StartLine": 1, "EndLine": 1, "StartColumn": 21, "EndColumn": 28},
     ]
     with patch("subprocess.run", return_value=_ok(_finding_json(findings))):
-        out, _ = redact(input_text)
+        out, _ = redact(input_text, cwd=tmp_path)
 
     assert "AAAAAAAA" not in out
     assert "BBBBBBBB" not in out
@@ -300,7 +341,7 @@ def test_redact_splices_without_shifting_earlier_findings() -> None:
 
 
 @pytest.mark.integration
-def test_redact_real_gitleaks_catches_synthetic_pat() -> None:
+def test_redact_real_gitleaks_catches_synthetic_pat(tmp_path: Path) -> None:
     """End-to-end smoke: pipe a synthetic GitHub PAT through real gitleaks.
 
     Gated on ``REACHY_DUCKY_RUN_INTEGRATION=1`` — the only test in
@@ -322,7 +363,7 @@ def test_redact_real_gitleaks_catches_synthetic_pat() -> None:
     fake_pat = "ghp_" + "xK9Pm2Qw7nL8tRa5VcFgHjKbNdEfShUzMvXy"  # gitleaks:allow
     synthetic = f"benign preamble\ngithub_pat = {fake_pat}\npostamble line\n"
 
-    redacted, flags = redact(synthetic)
+    redacted, flags = redact(synthetic, cwd=tmp_path)
 
     assert fake_pat not in redacted
     assert "[REDACTED:github-pat]" in redacted

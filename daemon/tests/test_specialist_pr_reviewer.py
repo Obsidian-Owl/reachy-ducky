@@ -912,7 +912,9 @@ async def test_pr_reviewer_redacts_happy_path(tmp_path: Path) -> None:
         }
     )
 
-    def _fake_redact(text: str) -> tuple[str, list[str]]:
+    def _fake_redact(text: str, *, cwd: Path) -> tuple[str, list[str]]:
+        assert cwd == tmp_path
+
         return text.replace("sensitive_token_here", "[REDACTED:fake-rule]"), ["fake-rule"]
 
     brain = MockBrain()
@@ -960,7 +962,9 @@ async def test_pr_reviewer_redacts_diagnostic_path(tmp_path: Path) -> None:
         }
     )
 
-    def _fake_redact(text: str) -> tuple[str, list[str]]:
+    def _fake_redact(text: str, *, cwd: Path) -> tuple[str, list[str]]:
+        assert cwd == tmp_path
+
         return text.replace("sensitive_token_here", "[REDACTED:fake-rule]"), ["fake-rule"]
 
     brain = MockBrain()

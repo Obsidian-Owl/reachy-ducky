@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import subprocess  # nosec B404 — list-form read-only gitleaks only; no shell
+from pathlib import Path
 from typing import TypedDict
 
 __all__ = [
@@ -53,7 +54,7 @@ class _Finding(TypedDict):
     EndColumn: int
 
 
-def redact(text: str) -> tuple[str, list[str]]:
+def redact(text: str, *, cwd: Path) -> tuple[str, list[str]]:
     """Return ``(redacted_text, deduplicated_rule_ids)``.
 
     Invokes ``gitleaks stdin`` with ``--redact`` (so raw secrets never
@@ -62,8 +63,18 @@ def redact(text: str) -> tuple[str, list[str]]:
     Rule IDs in the returned list are deduplicated, order-preserved
     (first occurrence wins).
 
+    ``cwd`` is the project directory gitleaks runs inside — required so
+    the config-precedence chain picks up any repo-local
+    ``.gitleaks.toml`` (the "what's a secret" rules stay unified with
+    ``lefthook pre-commit``'s ``gitleaks protect --staged``). Without
+    this, gitleaks would inherit the daemon's CWD and silently skip
+    repo-local allowlists. Required kwarg specifically so callers can
+    never accidentally forget — the daemon might be started from any
+    directory, but the specialists always know their project root.
+
     Raises :class:`RedactionError` on missing binary, subprocess
-    timeout, non-zero exit, malformed JSON, or unexpected JSON shape.
+    timeout, non-zero exit, malformed JSON, unexpected JSON shape,
+    malformed findings, or coordinates out of range.
     """
     try:
         proc = subprocess.run(  # noqa: S603  # nosec B603 B607 — list form, read-only gitleaks only
@@ -80,6 +91,7 @@ def redact(text: str) -> tuple[str, list[str]]:
                 "--redact",
             ],
             input=text,
+            cwd=cwd,
             check=False,
             capture_output=True,
             text=True,
@@ -143,24 +155,55 @@ def redact(text: str) -> tuple[str, list[str]]:
         # end is exclusive 0-indexed, so EndColumn maps straight through.
         end_col_idx = f["EndColumn"]
 
-        # Defensive: clamp to the line list we have. Out-of-range indices
-        # mean gitleaks and our line-split disagree about content — fail
-        # closed rather than silently skip.
+        # Defensive line-range check. Out-of-range indices mean gitleaks
+        # and our text.split('\n') disagree about content — fail closed
+        # rather than silently skip.
         if not (0 <= start_line_idx < len(lines)) or not (0 <= end_line_idx < len(lines)):
             raise RedactionError(
                 f"gitleaks finding line {f['StartLine']}-{f['EndLine']} "
                 f"out of range (text has {len(lines)} lines)"
             )
 
+        # Defensive column-range check. Python slicing silently clamps
+        # negatives and oversized indices, which could leave part of a
+        # secret unredacted if gitleaks ever emits malformed coordinates
+        # (line-ending / unicode-width mismatches, etc.). Validate
+        # against the *actual* bounds of the lines we're about to edit.
+        if f["StartColumn"] < 1 or f["EndColumn"] < f["StartColumn"]:
+            raise RedactionError(
+                f"gitleaks finding has invalid column range "
+                f"{f['StartColumn']}-{f['EndColumn']} "
+                f"(StartColumn must be ≥ 1 and ≤ EndColumn)"
+            )
         if start_line_idx == end_line_idx:
             line = lines[start_line_idx]
+            if f["EndColumn"] > len(line) + 1:
+                # +1 because EndColumn is 1-indexed end-inclusive; a
+                # finding that covers the full line reports
+                # EndColumn == len(line).
+                raise RedactionError(
+                    f"gitleaks finding EndColumn {f['EndColumn']} "
+                    f"exceeds line {f['StartLine']} length ({len(line)})"
+                )
             lines[start_line_idx] = line[:start_col_idx] + marker + line[end_col_idx:]
         else:
+            start_line = lines[start_line_idx]
+            end_line = lines[end_line_idx]
+            if f["StartColumn"] > len(start_line) + 1:
+                raise RedactionError(
+                    f"gitleaks finding StartColumn {f['StartColumn']} "
+                    f"exceeds line {f['StartLine']} length ({len(start_line)})"
+                )
+            if f["EndColumn"] > len(end_line) + 1:
+                raise RedactionError(
+                    f"gitleaks finding EndColumn {f['EndColumn']} "
+                    f"exceeds line {f['EndLine']} length ({len(end_line)})"
+                )
             # Multi-line: collapse the whole range to a single marker,
             # preserving any prefix on the start line and any suffix on
             # the end line. Inner + end lines drop.
-            prefix = lines[start_line_idx][:start_col_idx]
-            suffix = lines[end_line_idx][end_col_idx:]
+            prefix = start_line[:start_col_idx]
+            suffix = end_line[end_col_idx:]
             lines[start_line_idx] = prefix + marker + suffix
             del lines[start_line_idx + 1 : end_line_idx + 1]
 

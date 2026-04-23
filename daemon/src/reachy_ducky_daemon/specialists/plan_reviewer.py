@@ -256,7 +256,7 @@ class PlanReviewer:
         )
 
         try:
-            redacted, rule_ids = redact(prompt)
+            redacted, rule_ids = redact(prompt, cwd=self._repo)
         except RedactionError as exc:
             return SpecialistResponse(
                 name=_SPECIALIST_NAME,
