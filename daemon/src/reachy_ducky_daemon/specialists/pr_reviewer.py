@@ -21,9 +21,14 @@ import json
 import subprocess  # nosec B404 — list-form read-only gh only; no shell
 from pathlib import Path
 
+from reachy_ducky_protocol.messages import BrainRequest, SpecialistResponse
+
+from reachy_ducky_daemon.brain.interface import BrainInterface
+
 __all__ = [
     "_GH_TIMEOUT_SECONDS",
     "_PR_VIEW_FIELDS",
+    "PRReviewer",
     "_assemble_diagnostic_prompt",
     "_assemble_prompt",
     "_current_branch",
@@ -35,6 +40,8 @@ __all__ = [
     "_find_pr_for_branch",
     "_run_gh",
 ]
+
+_SPECIALIST_NAME = "pr-reviewer"
 
 _DIRECTIVE = (
     "Synthesize a short PR digest for the developer. Be terse and "
@@ -427,3 +434,118 @@ def _assemble_diagnostic_prompt(
     parts.append("=== TASK ===")
     parts.append(_DIAGNOSTIC_DIRECTIVE)
     return "\n".join(parts)
+
+
+class PRReviewer:
+    """Hybrid specialist: pre-load PR surfaces + brain synthesis.
+
+    Matches the :class:`PlanReviewer` shape — deterministic pre-fetch in
+    Python, exactly one ``brain.query()`` call per :meth:`review`, wrap
+    the reply as :class:`SpecialistResponse`.
+
+    ``owner`` and ``repo_name`` are passed explicitly rather than parsed
+    from ``Project.github_repo`` inside the specialist — the caller
+    (the server route) already holds the project config and splitting
+    the string is its concern, not the specialist's.
+
+    Invocation contract:
+
+    * ``review(pr_number=N)`` → explicit: fetch that PR.
+    * ``review(pr_number=None)`` → auto-detect: ``git rev-parse`` →
+      ``gh pr list --head <branch>`` → fetch if found.
+    * No PR found (for any reason) → diagnostic prompt; brain is
+      expected to investigate with its tool surface and return an
+      actionable explanation rather than a review-of-nothing.
+
+    Exactly one ``brain.query()`` call fires per :meth:`review` invocation
+    regardless of which path is taken.
+    """
+
+    def __init__(
+        self,
+        *,
+        brain: BrainInterface,
+        repo: Path,
+        owner: str,
+        repo_name: str,
+    ) -> None:
+        self._brain = brain
+        self._repo = repo
+        self._owner = owner
+        self._repo_name = repo_name
+
+    async def review(self, *, pr_number: int | None = None) -> SpecialistResponse:
+        """Run the full review cycle for the resolved PR (or diagnostic path)."""
+        resolved_pr, branch, branch_err, find_err = self._resolve_pr(pr_number)
+
+        if resolved_pr is None:
+            return await self._diagnostic_response(
+                branch=branch, branch_error=branch_err, find_error=find_err
+            )
+
+        pr_meta, meta_err = _fetch_pr_metadata(resolved_pr, cwd=self._repo)
+        if not pr_meta:
+            # Resolved a number but couldn't fetch — surface the reason.
+            return await self._diagnostic_response(
+                branch=branch,
+                branch_error=None,
+                find_error=meta_err or f"could not fetch PR #{resolved_pr}",
+            )
+
+        diff, _diff_err = _fetch_diff(resolved_pr, cwd=self._repo)
+        comments, _c_err = _fetch_review_comments(
+            owner=self._owner,
+            repo=self._repo_name,
+            pr_number=resolved_pr,
+            cwd=self._repo,
+        )
+        head_sha = pr_meta.get("headRefOid")
+        if isinstance(head_sha, str) and head_sha:
+            check_runs, _ci_err = _fetch_check_runs(
+                owner=self._owner,
+                repo=self._repo_name,
+                head_sha=head_sha,
+                cwd=self._repo,
+            )
+        else:
+            check_runs = []
+
+        prompt = _assemble_prompt(pr=pr_meta, diff=diff, comments=comments, check_runs=check_runs)
+        flags = _derive_flags(pr=pr_meta, comments=comments, check_runs=check_runs)
+        brain_resp = await self._brain.query(BrainRequest(user_utterance=prompt))
+        return SpecialistResponse(name=_SPECIALIST_NAME, summary=brain_resp.text, flags=flags)
+
+    async def _diagnostic_response(
+        self,
+        *,
+        branch: str,
+        branch_error: str | None,
+        find_error: str | None,
+    ) -> SpecialistResponse:
+        """Dispatch the diagnostic prompt and wrap the brain's reply."""
+        prompt = _assemble_diagnostic_prompt(
+            branch=branch or "unknown",
+            branch_error=branch_error,
+            find_error=find_error,
+        )
+        flags = _derive_flags(pr={}, comments=[], check_runs=[])
+        brain_resp = await self._brain.query(BrainRequest(user_utterance=prompt))
+        return SpecialistResponse(name=_SPECIALIST_NAME, summary=brain_resp.text, flags=flags)
+
+    def _resolve_pr(self, pr_number: int | None) -> tuple[int | None, str, str | None, str | None]:
+        """Return ``(pr, branch, branch_error, find_error)`` per the resolution order.
+
+        Explicit ``pr_number`` short-circuits the auto-detect path. The
+        ``branch`` slot is ``"(explicit)"`` in that case — a sentinel
+        the diagnostic path never sees but which keeps the return shape
+        uniform.
+        """
+        if pr_number is not None:
+            return pr_number, "(explicit)", None, None
+
+        branch, branch_err = _current_branch(self._repo)
+        if branch_err is not None:
+            return None, branch, branch_err, None
+
+        pr, find_err = _find_pr_for_branch(branch=branch, cwd=self._repo)
+        return pr, branch, None, find_err

@@ -9,11 +9,16 @@ outputs live under ``daemon/tests/fixtures/gh_*.json``.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
+import pytest
+from reachy_ducky_daemon.brain.mock import MockBrain
 from reachy_ducky_daemon.specialists.pr_reviewer import (
     _GH_TIMEOUT_SECONDS,
+    PRReviewer,
     _assemble_diagnostic_prompt,
     _assemble_prompt,
     _current_branch,
@@ -25,6 +30,7 @@ from reachy_ducky_daemon.specialists.pr_reviewer import (
     _find_pr_for_branch,
     _run_gh,
 )
+from reachy_ducky_protocol.messages import SpecialistResponse
 
 
 def test_run_gh_invokes_list_form_with_timeout() -> None:
@@ -506,4 +512,182 @@ def test_assemble_diagnostic_prompt_surfaces_sub_diagnostics() -> None:
         find_error="gh pr list --head unknown failed: authentication required",
     )
     assert "not a git repository" in prompt
+    assert "authentication required" in prompt
+
+
+# ---------------------------------------------------------------------------
+# PRReviewer orchestrator — end-to-end (subprocess mocked, brain mocked)
+# ---------------------------------------------------------------------------
+
+
+def _ok(stdout: str) -> subprocess.CompletedProcess[str]:
+    """Shorthand for a successful ``CompletedProcess`` with canned stdout."""
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+def _mock_by_argv(
+    returns: dict[tuple[str, ...], subprocess.CompletedProcess[str]],
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Build a ``subprocess.run`` side_effect that dispatches by argv prefix.
+
+    Longer patterns take precedence over shorter ones — important for
+    distinguishing ``gh api /repos/.../pulls/.../comments`` from
+    ``gh api /repos/.../commits/.../check-runs``.
+    """
+    # Sort keys by length descending so the most specific match wins.
+    ordered = sorted(returns.items(), key=lambda kv: -len(kv[0]))
+
+    def _side_effect(
+        argv: list[str], *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        key = tuple(argv)
+        for pat, proc in ordered:
+            if key[: len(pat)] == pat:
+                return proc
+        raise AssertionError(f"unexpected argv: {argv}")
+
+    return _side_effect
+
+
+@pytest.mark.asyncio
+async def test_review_explicit_pr_number_happy_path(tmp_path: Path) -> None:
+    """Explicit pr_number → fetch all surfaces, assemble prompt, query brain once."""
+    pr_view = _FIXTURES / "gh_pr_view_happy.json"
+    comments = _FIXTURES / "gh_api_comments.json"
+    check_runs = _FIXTURES / "gh_api_check_runs.json"
+
+    side_effect = _mock_by_argv(
+        {
+            ("gh", "pr", "view"): _ok(pr_view.read_text()),
+            ("gh", "pr", "diff"): _ok("diff --git a/src/x.py\n+x = 2\n"),
+            (
+                "gh",
+                "api",
+                "/repos/Obsidian-Owl/reachy-ducky/pulls/42/comments",
+            ): _ok(comments.read_text()),
+            (
+                "gh",
+                "api",
+                "/repos/Obsidian-Owl/reachy-ducky/commits/abc123def456/check-runs",
+            ): _ok(check_runs.read_text()),
+        }
+    )
+
+    brain = MockBrain()
+    reviewer = PRReviewer(
+        brain=brain,
+        repo=tmp_path,
+        owner="Obsidian-Owl",
+        repo_name="reachy-ducky",
+    )
+    with patch("subprocess.run", side_effect=side_effect):
+        response = await reviewer.review(pr_number=42)
+
+    assert isinstance(response, SpecialistResponse)
+    assert response.name == "pr-reviewer"
+    # Exactly one brain call — Pattern A contract.
+    assert len(brain.calls) == 1
+    prompt = brain.calls[0].user_utterance
+    assert "feat: add retry logic" in prompt
+    assert "+x = 2" in prompt
+    assert "augment-code[bot]" in prompt
+    # Fixture has mypy failing → ci-red wins over pytest pending.
+    assert "ci-red" in response.flags
+    assert "has-unresolved-comments" in response.flags
+
+
+@pytest.mark.asyncio
+async def test_review_auto_detect_from_current_branch(tmp_path: Path) -> None:
+    """No pr_number → git rev-parse + gh pr list → resolve → same happy fetch."""
+    pr_view = _FIXTURES / "gh_pr_view_happy.json"
+
+    side_effect = _mock_by_argv(
+        {
+            ("git", "rev-parse", "--abbrev-ref", "HEAD"): _ok("feat-retry\n"),
+            ("gh", "pr", "list"): _ok('[{"number": 42}]'),
+            ("gh", "pr", "view"): _ok(pr_view.read_text()),
+            ("gh", "pr", "diff"): _ok(""),
+            (
+                "gh",
+                "api",
+                "/repos/Obsidian-Owl/reachy-ducky/pulls/42/comments",
+            ): _ok("[]"),
+            (
+                "gh",
+                "api",
+                "/repos/Obsidian-Owl/reachy-ducky/commits/abc123def456/check-runs",
+            ): _ok('{"total_count": 0, "check_runs": []}'),
+        }
+    )
+
+    brain = MockBrain()
+    reviewer = PRReviewer(
+        brain=brain,
+        repo=tmp_path,
+        owner="Obsidian-Owl",
+        repo_name="reachy-ducky",
+    )
+    with patch("subprocess.run", side_effect=side_effect):
+        response = await reviewer.review(pr_number=None)
+
+    assert response.name == "pr-reviewer"
+    assert len(brain.calls) == 1
+    assert "feat: add retry logic" in brain.calls[0].user_utterance
+    # Empty comments + empty check-runs — no ci-* flag, no unresolved-comments.
+    assert not any(f.startswith("ci-") for f in response.flags)
+    assert "has-unresolved-comments" not in response.flags
+
+
+@pytest.mark.asyncio
+async def test_review_graceful_fail_when_no_pr_for_branch(tmp_path: Path) -> None:
+    """Auto-detect branch has no open PR → diagnostic prompt + no-pr-found flag."""
+    side_effect = _mock_by_argv(
+        {
+            ("git", "rev-parse", "--abbrev-ref", "HEAD"): _ok("feat-orphan\n"),
+            ("gh", "pr", "list"): _ok("[]"),
+        }
+    )
+
+    brain = MockBrain()
+    reviewer = PRReviewer(
+        brain=brain,
+        repo=tmp_path,
+        owner="Obsidian-Owl",
+        repo_name="reachy-ducky",
+    )
+    with patch("subprocess.run", side_effect=side_effect):
+        response = await reviewer.review(pr_number=None)
+
+    assert response.name == "pr-reviewer"
+    assert "no-pr-found" in response.flags
+    assert len(brain.calls) == 1
+    prompt = brain.calls[0].user_utterance
+    assert "feat-orphan" in prompt
+    assert "no open pr" in prompt.lower() or "no pr" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_review_graceful_fail_surfaces_gh_lookup_error(tmp_path: Path) -> None:
+    """gh pr list failing is distinct from "no PR" — error is in the diagnostic prompt."""
+    side_effect = _mock_by_argv(
+        {
+            ("git", "rev-parse", "--abbrev-ref", "HEAD"): _ok("feat-x\n"),
+            ("gh", "pr", "list"): subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="authentication required"
+            ),
+        }
+    )
+
+    brain = MockBrain()
+    reviewer = PRReviewer(
+        brain=brain,
+        repo=tmp_path,
+        owner="Obsidian-Owl",
+        repo_name="reachy-ducky",
+    )
+    with patch("subprocess.run", side_effect=side_effect):
+        response = await reviewer.review(pr_number=None)
+
+    assert "no-pr-found" in response.flags
+    prompt = brain.calls[0].user_utterance
     assert "authentication required" in prompt
