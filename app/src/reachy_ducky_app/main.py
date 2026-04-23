@@ -27,6 +27,15 @@ from .embodiment.motion_driver import ReachyMotionDriver
 from .embodiment.state_machine import EmbodimentStateMachine
 from .voice.audio_io import load_default_mic_source, load_default_speaker_sink
 from .voice.openai_realtime import OpenAIRealtimeVoice
+from .wake import load_default_wake_detector
+
+# How often the stop-bridge checks ``threading.Event.is_set()``. This is a
+# memory-load poll only — the wake path itself awaits ``wake.event`` via
+# ``asyncio.wait(FIRST_COMPLETED)`` and never spins. ``threading.Event``
+# has no native async ``wait``; a 10 Hz check against a shared memory flag
+# is far cheaper than the original 20 Hz wake-loop re-entry, and avoids
+# pulling in ``janus`` / ``asyncio.to_thread`` plumbing we don't need yet.
+_STOP_BRIDGE_POLL_SECONDS = 0.1
 
 
 class ReachyDuckyApp:
@@ -49,7 +58,13 @@ class ReachyDuckyApp:
         reachy_mini: object,
         stop_event: threading.Event,
     ) -> None:
-        """Construct the piece graph and poll for wake events until stopped.
+        """Construct the piece graph and await wake events until stopped.
+
+        The main loop blocks on ``asyncio.wait({wake.event.wait(),
+        stop_checker}, return_when=FIRST_COMPLETED)`` — the wake path is
+        pure event-driven (no polling), and the stop path is a tiny 10 Hz
+        memory-load check (see :data:`_STOP_BRIDGE_POLL_SECONDS`) bridging
+        the on-robot daemon's ``threading.Event`` into asyncio.
 
         The daemon client pools an ``httpx.AsyncClient`` across turns; we
         wrap the wake loop in ``try/finally`` so the pool is drained on
@@ -63,33 +78,55 @@ class ReachyDuckyApp:
             speaker=load_default_speaker_sink(),
         )
         daemon = DaemonClient.from_env()
+        wake = load_default_wake_detector()
 
+        stop_checker = asyncio.create_task(_watch_stop(stop_event))
         try:
             while not stop_event.is_set():
-                # Phase A simplification: wake detection is stubbed (the default
-                # `MockWakeDetector.feed_audio` returns False unconditionally). A
-                # future task swaps in the real ONNX-backed detector and wires it
-                # to an audio pump that calls `wake.feed_audio(chunk)` on each
-                # mic buffer; `_wake_triggered` is then the bridge between that
-                # pump and the per-turn conversation loop.
-                if self._wake_triggered():
-                    await run_one_turn(voice=voice, sm=sm, daemon=daemon, project_slug=None)
-                await asyncio.sleep(0.05)
+                wake_waiter = asyncio.create_task(wake.event.wait())
+                try:
+                    await asyncio.wait(
+                        {wake_waiter, stop_checker},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    if not wake_waiter.done():
+                        wake_waiter.cancel()
+                if stop_event.is_set():
+                    break
+                wake.event.clear()
+                await run_one_turn(voice=voice, sm=sm, daemon=daemon, project_slug=None)
         finally:
+            stop_checker.cancel()
+            try:
+                await stop_checker
+            except asyncio.CancelledError:
+                pass
             await daemon.aclose()
 
     def _wake_triggered(self) -> bool:
-        """Placeholder: returns False until the real audio pump is wired.
+        """Deprecated test-override seam; no longer called by :meth:`_run_async`.
 
-        The real audio pump (landing with #23's ReachyMicSource) will feed
-        chunks into ``wake.feed_audio(chunk)`` and set a shared
-        ``asyncio.Event`` that :meth:`_run_async` awaits — this method is
-        the bridge between that pump and the per-turn conversation loop.
-
-        Overridable in tests to simulate wake events without needing the
-        ONNX model or mic hardware.
+        Kept so that subclassing to force-trigger a wake via method
+        override remains a stable escape hatch for future refactors. The
+        event-driven loop in :meth:`_run_async` drives turns via
+        ``wake.event`` only, so the default ``False`` body is harmless.
         """
         return False
+
+
+async def _watch_stop(stop_event: threading.Event) -> None:
+    """Bridge ``threading.Event`` into asyncio so ``asyncio.wait`` can select it.
+
+    10 Hz memory-load poll (see :data:`_STOP_BRIDGE_POLL_SECONDS`) — NOT
+    a wake poll. The wake path is fully event-driven. We accept this
+    small residual polling because ``threading.Event`` has no native
+    async ``wait``; alternatives (``janus.Queue`` or
+    ``asyncio.to_thread(stop_event.wait)``) are zero-poll but add
+    complexity that isn't justified today.
+    """
+    while not stop_event.is_set():
+        await asyncio.sleep(_STOP_BRIDGE_POLL_SECONDS)
 
 
 def main() -> None:
