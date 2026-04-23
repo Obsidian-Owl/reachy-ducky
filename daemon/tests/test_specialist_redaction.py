@@ -191,6 +191,19 @@ def test_redact_raises_on_multiline_start_column_past_line_length(tmp_path: Path
             redact("short\nlines here\n", cwd=tmp_path)
 
 
+def test_redact_raises_on_inverted_line_range(tmp_path: Path) -> None:
+    """StartLine > EndLine → RedactionError (Codex P2, PR #52 second review).
+
+    Python's ``del lines[start+1:end+1]`` silently no-ops on a reversed
+    slice, which would leave the original secret text in place while the
+    marker landed on the wrong line. Fail closed instead.
+    """
+    bad = '[{"RuleID": "x", "StartLine": 3, "EndLine": 1, "StartColumn": 1, "EndColumn": 3}]'
+    with patch("subprocess.run", return_value=_ok(bad)):
+        with pytest.raises(RedactionError, match="inverted line range"):
+            redact("aaa\nbbb\nccc\nddd\n", cwd=tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # Splicing logic — single-line, multi-line, dedup
 # ---------------------------------------------------------------------------
@@ -333,6 +346,137 @@ def test_redact_splices_without_shifting_earlier_findings(tmp_path: Path) -> Non
     # Bookend words still present and in order.
     assert out.index("alpha") < out.index("[REDACTED:rule-a]") < out.index("beta")
     assert out.index("beta") < out.index("[REDACTED:rule-b]") < out.index("end")
+
+
+def test_redact_multiline_allows_end_column_less_than_start_column(tmp_path: Path) -> None:
+    """Multi-line finding where EndColumn < StartColumn is legitimate.
+
+    StartColumn and EndColumn apply to different lines when StartLine <
+    EndLine, so there's no cross-line ordering relationship between
+    them — ``col 7 on line 1`` to ``col 4 on line 2`` is a valid span.
+    Regression guard: an earlier check rejected this case unconditionally
+    and had to be narrowed to same-line findings.
+    """
+    # Span: from col 7 on line 1 through col 4 on line 2 (inclusive).
+    findings = [
+        {
+            "RuleID": "private-key",
+            "StartLine": 1,
+            "EndLine": 2,
+            "StartColumn": 7,
+            "EndColumn": 4,
+        }
+    ]
+    with patch("subprocess.run", return_value=_ok(_finding_json(findings))):
+        out, flags = redact("prefix-SECRET\nKEY-suffix\n", cwd=tmp_path)
+
+    assert "[REDACTED:private-key]" in out
+    assert flags == ["private-key"]
+
+
+def test_redact_merges_overlapping_same_line_findings(tmp_path: Path) -> None:
+    """Overlapping findings on one line → single composite marker with both rule IDs.
+
+    Codex P1 (PR #52 second review): descending sort only preserves
+    coordinate stability for disjoint intervals. If gitleaks emits two
+    findings that share a position (same token matching two rules),
+    splicing one mutates the coordinate space the other was measured in
+    and can leave a secret fragment behind.
+    """
+    # Same token at cols 1..14 matches two rules. A (broad) covers 1..14,
+    # B (specific) covers 5..14. Overlap → merged span 1..14 with both
+    # rule IDs, first-occurrence order.
+    findings = [
+        {
+            "RuleID": "generic-api-key",
+            "StartLine": 1,
+            "EndLine": 1,
+            "StartColumn": 1,
+            "EndColumn": 14,
+        },
+        {
+            "RuleID": "github-pat",
+            "StartLine": 1,
+            "EndLine": 1,
+            "StartColumn": 5,
+            "EndColumn": 14,
+        },
+    ]
+    with patch("subprocess.run", return_value=_ok(_finding_json(findings))):
+        out, flags = redact("ghp_ABCDEFGHIJ rest", cwd=tmp_path)
+
+    # Exactly one splice (not two) — the overlap merged into one composite.
+    assert out.count("[REDACTED:") == 1
+    # Marker carries both rule IDs, comma-joined, first-occurrence order.
+    assert "[REDACTED:generic-api-key,github-pat]" in out
+    # Original token gone.
+    assert "ghp_ABCDEFGHIJ" not in out
+    assert "rest" in out
+    # Flags list both rules, deduped, first-occurrence order.
+    assert flags == ["generic-api-key", "github-pat"]
+
+
+def test_redact_merges_overlapping_multi_line_findings(tmp_path: Path) -> None:
+    """Overlap across lines → single composite marker spanning the union."""
+    # A: line 1 col 1 → line 2 col 3.
+    # B: line 2 col 2 → line 3 col 5. They share position (2, 2..3).
+    # Merged: line 1 col 1 → line 3 col 5, rule_ids=[A, B].
+    findings = [
+        {
+            "RuleID": "rule-a",
+            "StartLine": 1,
+            "EndLine": 2,
+            "StartColumn": 1,
+            "EndColumn": 3,
+        },
+        {
+            "RuleID": "rule-b",
+            "StartLine": 2,
+            "EndLine": 3,
+            "StartColumn": 2,
+            "EndColumn": 5,
+        },
+    ]
+    with patch("subprocess.run", return_value=_ok(_finding_json(findings))):
+        out, flags = redact("aaaaa\nbbbbb\nccccc\n", cwd=tmp_path)
+
+    assert out.count("[REDACTED:") == 1
+    assert "[REDACTED:rule-a,rule-b]" in out
+    assert flags == ["rule-a", "rule-b"]
+
+
+def test_redact_non_overlapping_findings_stay_separate(tmp_path: Path) -> None:
+    """Non-overlapping findings must NOT merge — two markers, disjoint splices.
+
+    Regression guard for the overlap-merge pass: ranges [1..5] and
+    [7..11] share no position (col 6 sits between them), so the merge
+    logic must keep them separate. Otherwise adjacent findings would
+    collapse unnecessarily and lose per-rule attribution.
+    """
+    findings = [
+        {
+            "RuleID": "rule-a",
+            "StartLine": 1,
+            "EndLine": 1,
+            "StartColumn": 1,
+            "EndColumn": 5,
+        },
+        {
+            "RuleID": "rule-b",
+            "StartLine": 1,
+            "EndLine": 1,
+            "StartColumn": 7,
+            "EndColumn": 11,
+        },
+    ]
+    with patch("subprocess.run", return_value=_ok(_finding_json(findings))):
+        out, flags = redact("AAAAA BBBBB end", cwd=tmp_path)
+
+    assert out.count("[REDACTED:rule-a]") == 1
+    assert out.count("[REDACTED:rule-b]") == 1
+    # No composite marker.
+    assert "[REDACTED:rule-a,rule-b]" not in out
+    assert flags == ["rule-a", "rule-b"]
 
 
 # ---------------------------------------------------------------------------
