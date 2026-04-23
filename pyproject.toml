@@ -1,6 +1,25 @@
 [tool.uv.workspace]
 members = ["daemon", "app", "menubar", "protocol"]
 
+# Upstream ``gstreamer-libs`` ships divergent ``Requires-Dist`` across
+# platform wheels (macOS wheel lists only ``setuptools``; Windows
+# wheels additionally list ``gstreamer-msvc-runtime``). No sdist.
+# uv picks one wheel's metadata as the universal value, which on
+# macOS / Linux incorrectly requires ``gstreamer-msvc-runtime`` — a
+# Windows-only package with no matching sdist / non-win wheel.
+#
+# This override patches the ``Requires-Dist`` to match the ACTUAL
+# per-wheel graph. Mirrors the intent of pollen-robotics/
+# reachy_mini_conversation_app's workaround, but with ``version``
+# omitted so it applies to ALL versions of ``gstreamer-libs`` (the
+# upstream bug persists across versions; Pollen's verbatim pin at
+# 1.28.1 is lock-state, not intentional). Remove when upstream
+# unifies wheel metadata or publishes an sdist. Tracked in #61.
+[tool.uv]
+dependency-metadata = [
+    { name = "gstreamer-libs", requires-dist = ["gstreamer-msvc-runtime; sys_platform == 'win32'", "setuptools"] },
+]
+
 # PEP 735 dependency groups — workspace-wide dev tools. Subpackages no longer
 # each carry their own `[project.optional-dependencies].dev`. Install with:
 #   uv sync --all-packages --group dev

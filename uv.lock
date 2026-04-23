@@ -25,6 +25,10 @@ dev = [
     { name = "ruff", specifier = ">=0.15.11,<0.16" },
 ]
 
+[[manifest.dependency-metadata]]
+name = "gstreamer-libs"
+requires-dist = ["gstreamer-msvc-runtime ; sys_platform == 'win32'", "setuptools"]
+
 [[package]]
 name = "absl-py"
 version = "2.4.0"
@@ -1112,7 +1116,7 @@ name = "gstreamer-libs"
 version = "1.28.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "gstreamer-msvc-runtime" },
+    { name = "gstreamer-msvc-runtime", marker = "sys_platform == 'win32'" },
     { name = "setuptools" },
 ]
 wheels = [
@@ -3034,10 +3038,6 @@ dependencies = [
     { name = "numpy" },
     { name = "openai" },
     { name = "reachy-ducky-protocol" },
-]
-
-[package.optional-dependencies]
-robot = [
     { name = "reachy-mini" },
 ]
 
@@ -3049,7 +3049,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "openai", specifier = ">=1.50,<2" },
     { name = "reachy-ducky-protocol", editable = "protocol" },
-    { name = "reachy-mini", marker = "extra == 'robot'", specifier = ">=1.0.0rc1,<2" },
+    { name = "reachy-mini", specifier = ">=1.6.4,<2" },
 ]
 
 [[package]]
