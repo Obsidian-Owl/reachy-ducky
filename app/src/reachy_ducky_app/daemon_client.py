@@ -123,3 +123,32 @@ class DaemonClient:
         )
         r.raise_for_status()
         return SpecialistResponse.model_validate(r.json())
+
+    async def pr_reviewer(
+        self,
+        *,
+        project_slug: str,
+        pr_number: int | None = None,
+    ) -> SpecialistResponse:
+        """POST ``/specialists/pr-reviewer`` and get a PR-digest envelope.
+
+        ``pr_number=None`` opts into the daemon's auto-detect path
+        (``git rev-parse`` + ``gh pr list --head`` on the project's
+        checkout). Supply an explicit number to target a specific PR.
+        120s timeout mirrors plan-reviewer: the brain runs one query
+        but the pre-fetch graph (metadata + diff + comments + CI) can
+        add real latency on a chatty PR.
+        """
+        req = SpecialistRequest(
+            name="pr-reviewer",
+            project_slug=project_slug,
+            pr_number=pr_number,
+        )
+        r = await self._http.post(
+            f"{self._base}/specialists/pr-reviewer",
+            json=req.model_dump(),
+            headers=self._headers(),
+            timeout=120.0,
+        )
+        r.raise_for_status()
+        return SpecialistResponse.model_validate(r.json())
