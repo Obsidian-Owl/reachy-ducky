@@ -108,6 +108,48 @@ def test_redact_raises_on_non_list_json() -> None:
             redact("anything")
 
 
+def test_redact_raises_on_generic_subprocess_error() -> None:
+    """OSError / generic SubprocessError → RedactionError (not a crash)."""
+    with patch("subprocess.run", side_effect=OSError("permission denied")):
+        with pytest.raises(RedactionError, match="subprocess failed"):
+            redact("anything")
+
+
+def test_redact_raises_on_non_dict_finding_entry() -> None:
+    """JSON list entry that isn't an object → RedactionError (fail closed).
+
+    Silently dropping malformed findings could leave secrets in the
+    output, so any list element we can't narrow becomes an error.
+    """
+    with patch("subprocess.run", return_value=_ok('["not a dict"]')):
+        with pytest.raises(RedactionError, match="not an object"):
+            redact("anything")
+
+
+def test_redact_raises_on_finding_missing_required_field() -> None:
+    """Finding object missing RuleID/StartLine/etc. → RedactionError."""
+    incomplete = '[{"RuleID": "github-pat", "StartLine": 1}]'
+    with patch("subprocess.run", return_value=_ok(incomplete)):
+        with pytest.raises(RedactionError, match="missing required field"):
+            redact("anything")
+
+
+def test_redact_raises_on_finding_out_of_range() -> None:
+    """Finding coords beyond the parsed line count → RedactionError (fail closed).
+
+    gitleaks and our ``text.split('\\n')`` disagreeing about line structure
+    means we can't trust the splice coordinates — better to abort than
+    risk a mis-placed marker that leaves a secret partially in.
+    """
+    # One-line input, finding claims it's on line 99.
+    findings_out_of_range = (
+        '[{"RuleID": "x", "StartLine": 99, "EndLine": 99, "StartColumn": 1, "EndColumn": 5}]'
+    )
+    with patch("subprocess.run", return_value=_ok(findings_out_of_range)):
+        with pytest.raises(RedactionError, match="out of range"):
+            redact("short input")
+
+
 # ---------------------------------------------------------------------------
 # Splicing logic — single-line, multi-line, dedup
 # ---------------------------------------------------------------------------

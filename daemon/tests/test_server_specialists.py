@@ -200,6 +200,11 @@ def _mock_gh_min(*, pr_json: str) -> Callable[..., subprocess.CompletedProcess[s
             return _ok('[{"number": 42}]')
         if argv[:2] == ["git", "rev-parse"]:
             return _ok("feat-retry\n")
+        # Redaction path (wired into PRReviewer after #50 landed) — pass
+        # through with zero findings so the route's happy path reaches
+        # brain.query unmodified from this test's perspective.
+        if argv[:2] == ["gitleaks", "stdin"]:
+            return _ok("[]")
         raise AssertionError(f"unexpected argv: {argv}")
 
     return _side_effect
