@@ -494,3 +494,74 @@ async def test_review_oserror_diagnostic_omits_absolute_path(
     assert "x.md" in prompt
     # The ABSOLUTE path must NOT appear — that's the leak we're closing.
     assert str(tmp_path) not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Size caps — per-file + total-budget (#2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_per_file_cap_truncates_individual_plans(tmp_path: Path) -> None:
+    """Plans longer than max_plan_chars get a truncation marker."""
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    big = "x" * 120_000
+    (plans_dir / "big.md").write_text(big)
+    _commit(tmp_path, "big plan")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(
+        brain=brain,
+        repo=tmp_path,
+        max_plan_chars=50_000,
+        max_total_plan_chars=200_000,
+    )
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # Per-file truncation marker present with the exact elided count.
+    assert "[... truncated: 70000 chars elided ...]" in prompt
+    # The full 120k body must NOT appear; allow modest overhead for
+    # other prompt sections that don't contain 'x'.
+    assert prompt.count("x") <= 60_000  # 50k truncated body + small slack
+
+
+@pytest.mark.asyncio
+async def test_total_cap_drops_remaining_plans(tmp_path: Path) -> None:
+    """Plans beyond max_total_plan_chars are replaced by an omission marker."""
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    # 5 plans × 50k each = 250k, exceeds 200k total cap.
+    for i in range(5):
+        (plans_dir / f"p{i}.md").write_text("y" * 50_000)
+    _commit(tmp_path, "many plans")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(
+        brain=brain,
+        repo=tmp_path,
+        max_plan_chars=60_000,
+        max_total_plan_chars=200_000,
+    )
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+    # At least one plan landed (early ones) and at least one was omitted.
+    assert "p0.md" in prompt
+    # Omission marker present somewhere in the prompt.
+    assert "plan(s) omitted" in prompt
+    assert "200000" in prompt  # the budget number is named in the marker
+
+
+def test_caps_have_sensible_defaults(tmp_path: Path) -> None:
+    """Defaults: max_plan_chars=50_000, max_total_plan_chars=200_000.
+
+    Pins the defaults so a future change is deliberate. Constructor is
+    keyword-only on these kwargs.
+    """
+    reviewer = PlanReviewer(brain=MockBrain(), repo=tmp_path)
+    assert reviewer._max_plan_chars == 50_000  # noqa: SLF001
+    assert reviewer._max_total_plan_chars == 200_000  # noqa: SLF001

@@ -136,8 +136,22 @@ def _capture_diff(repo: Path, branch: str) -> tuple[str, str | None]:
     return fallback.stdout, fallback_err
 
 
+def _truncate_plan_body(body: str, max_chars: int) -> str:
+    """Truncate ``body`` to ``max_chars`` with an inline marker if cut.
+
+    Returns ``body`` unchanged when it fits; otherwise returns
+    ``body[:max_chars] + "\\n[... truncated: N chars elided ...]\\n"``
+    where N is the dropped char count.
+    """
+    if len(body) <= max_chars:
+        return body
+    elided = len(body) - max_chars
+    return body[:max_chars] + f"\n[... truncated: {elided} chars elided ...]\n"
+
+
 def _collect_plans(
     repo: Path,
+    max_chars_per_plan: int,
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """Return ``(readable, unreadable)``.
 
@@ -149,6 +163,11 @@ def _collect_plans(
     used by ``_current_branch`` and ``_capture_diff`` — the diagnostic
     surfaces to the brain via the ``=== UNREADABLE PLANS ===`` prompt
     section in ``_assemble_prompt`` rather than being silently swallowed.
+
+    ``max_chars_per_plan`` caps each individual readable body via
+    :func:`_truncate_plan_body`; oversize bodies are cut with a visible
+    inline marker so the brain knows truncation occurred. The cap is
+    applied after the successful read, before appending to ``readable``.
     """
     readable: list[tuple[str, str]] = []
     unreadable: list[tuple[str, str]] = []
@@ -168,8 +187,52 @@ def _collect_plans(
             # UnicodeDecodeError.__str__ doesn't embed a path; safe as-is.
             unreadable.append((rel, f"UnicodeDecodeError: {exc}"))
             continue
-        readable.append((rel, content))
+        readable.append((rel, _truncate_plan_body(content, max_chars_per_plan)))
     return readable, unreadable
+
+
+def _assemble_plans_block(
+    plans: list[tuple[str, str]],
+    max_total_chars: int,
+) -> list[str]:
+    """Build the ``=== PLANS ===`` section under a total-char budget.
+
+    Concatenates plan bodies in order; once the cumulative body length
+    would exceed ``max_total_chars`` (after at least one plan has
+    landed), appends a single ``[... N plan(s) omitted ...]`` marker
+    and stops. The ``(no plans)`` branch is unchanged.
+
+    The "at least one plan included" guard means a single oversized
+    plan (longer than the total budget) still lands — so the brain
+    always gets at least one plan when any exist. Per-file truncation
+    in :func:`_collect_plans` bounds the damage in that edge case.
+    """
+    parts: list[str] = ["=== PLANS ==="]
+    if not plans:
+        parts.append(
+            "(no plan or spec files discovered under conventional locations — "
+            "docs/plans/**/*.md, specs/**/*.md, root AGENTS.md/CLAUDE.md/SPEC.md, "
+            "*.plan.md)",
+        )
+        return parts
+
+    used = 0
+    included = 0
+    for rel, body in plans:
+        block = f"--- {rel} ---\n{body.rstrip(chr(10))}\n"
+        if used + len(block) > max_total_chars and included > 0:
+            remaining = len(plans) - included
+            parts.append(
+                f"[... {remaining} plan(s) omitted: total body "
+                f"budget of {max_total_chars} chars exhausted ...]",
+            )
+            break
+        parts.append(f"--- {rel} ---")
+        parts.append(body.rstrip("\n"))
+        parts.append("")
+        used += len(block)
+        included += 1
+    return parts
 
 
 def _assemble_prompt(
@@ -179,6 +242,8 @@ def _assemble_prompt(
     unreadable_plans: list[tuple[str, str]],
     diff: str,
     diff_error: str | None,
+    *,
+    max_total_chars: int,
 ) -> str:
     """Build the final single-string prompt the brain receives.
 
@@ -193,10 +258,12 @@ def _assemble_prompt(
     unreadable" from "file never existed". The section is omitted when
     every plan loads cleanly to avoid cluttering the common case.
 
-    TODO(#2): add per-file and total byte caps with a truncation marker.
-    Repos with many large plans risk silent context-window overflow at
-    the SDK layer; a marked in-prompt truncation is better than opaque
-    SDK-level cutoff.
+    ``max_total_chars`` caps the cumulative body length across all
+    plans; once exhausted, remaining plans are replaced by a single
+    ``[... N plan(s) omitted ...]`` marker (see
+    :func:`_assemble_plans_block`). Visible in-prompt truncation is
+    better than silent SDK-layer cutoff when Claude's context window
+    would be blown by the concatenated plan bodies.
     """
     parts: list[str] = []
     parts.append(f"Branch: {branch}")
@@ -204,18 +271,7 @@ def _assemble_prompt(
         parts.append(f"(diagnostic: {branch_error})")
     parts.append("")
 
-    parts.append("=== PLANS ===")
-    if not plans:
-        parts.append(
-            "(no plan or spec files discovered under conventional locations — "
-            "docs/plans/**/*.md, specs/**/*.md, root AGENTS.md/CLAUDE.md/SPEC.md, "
-            "*.plan.md)",
-        )
-    else:
-        for rel, content in plans:
-            parts.append(f"--- {rel} ---")
-            parts.append(content.rstrip("\n"))
-            parts.append("")
+    parts.extend(_assemble_plans_block(plans, max_total_chars))
     parts.append("")
 
     if unreadable_plans:
@@ -247,15 +303,41 @@ def _assemble_prompt(
 class PlanReviewer:
     """Hybrid specialist: pre-load plans + diff, then query the brain."""
 
-    def __init__(self, brain: BrainInterface, repo: Path) -> None:
+    def __init__(
+        self,
+        brain: BrainInterface,
+        repo: Path,
+        *,
+        max_plan_chars: int = 50_000,
+        max_total_plan_chars: int = 200_000,
+    ) -> None:
         """Bind the specialist to a brain and a repo root.
 
         ``repo`` is expected to be a checked-out git working tree. The
         specialist treats it as a read-only boundary — no command
         issued from here can mutate its state.
+
+        ``max_plan_chars`` (default 50,000) caps each individual plan's
+        body length in the assembled prompt. Bodies over the cap are
+        truncated with an inline ``[... truncated: N chars elided ...]``
+        marker. Calibrated to typical plan sizes in this repo (the
+        Phase A plan is ~3,000 lines / ~140KB); raise via constructor
+        for a repo with much larger plans.
+
+        ``max_total_plan_chars`` (default 200,000) caps the cumulative
+        body length across all plans. Once the budget is exhausted,
+        the remaining plans are replaced by a single
+        ``[... N plan(s) omitted ...]`` marker. Calibrated against
+        Claude's 200k-token context — chars × ~4-bytes-per-token leaves
+        headroom for the diff, the brain's response, and other sections.
+
+        Both caps are keyword-only so a future signature evolution can
+        add positional kwargs without ambiguity. (#2)
         """
         self._brain = brain
         self._repo = repo
+        self._max_plan_chars = max_plan_chars
+        self._max_total_plan_chars = max_total_plan_chars
 
     async def review(self) -> SpecialistResponse:
         """Assemble the review prompt, redact secrets, dispatch to the brain.
@@ -266,7 +348,10 @@ class PlanReviewer:
         secret leaks.
         """
         branch, branch_error = _current_branch(self._repo)
-        plans, unreadable_plans = _collect_plans(self._repo)
+        plans, unreadable_plans = _collect_plans(
+            self._repo,
+            max_chars_per_plan=self._max_plan_chars,
+        )
         diff, diff_error = _capture_diff(self._repo, branch)
 
         prompt = _assemble_prompt(
@@ -276,6 +361,7 @@ class PlanReviewer:
             unreadable_plans=unreadable_plans,
             diff=diff,
             diff_error=diff_error,
+            max_total_chars=self._max_total_plan_chars,
         )
 
         try:
