@@ -8,6 +8,7 @@ outputs live under ``daemon/tests/fixtures/gh_*.json``.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -691,3 +692,55 @@ async def test_review_graceful_fail_surfaces_gh_lookup_error(tmp_path: Path) -> 
     assert "no-pr-found" in response.flags
     prompt = brain.calls[0].user_utterance
     assert "authentication required" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Integration (gated) — live Claude + real GitHub against a stable closed PR
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_pr_reviewer_live_claude(tmp_path: Path) -> None:
+    """End-to-end smoke against real Claude + real GitHub, stable closed PR #46.
+
+    Gated on ``REACHY_DUCKY_RUN_INTEGRATION=1`` — mirrors Task 2.3's
+    integration test shape (``test_plan_reviewer_live_claude``).
+    Targets ``Obsidian-Owl/reachy-ducky#46`` (closed pytest-asyncio bump;
+    won't drift). If you move this test to a different PR, pick one that
+    is closed/merged so the diff + comments surface stays deterministic.
+
+    Prereqs on the runner:
+
+    * ``gh`` CLI installed and authenticated (``GH_TOKEN`` or ``gh auth
+      login``).
+    * Claude Code CLI logged in so the Agent SDK inherits OAuth, or
+      ``ANTHROPIC_API_KEY`` set (see design doc §5).
+    """
+    if not os.environ.get("REACHY_DUCKY_RUN_INTEGRATION"):
+        pytest.skip("set REACHY_DUCKY_RUN_INTEGRATION=1 to run")
+
+    from reachy_ducky_daemon.brain.claude_sdk import ClaudeSDKBrain
+
+    # The integration target repo IS this checkout. ``gh`` infers the
+    # upstream from the remote, and ``ClaudeSDKBrain.with_tools`` scopes
+    # Read/Grep/Glob to ``cwd``.
+    repo = Path.cwd()
+    memory_root = tmp_path / "memory"
+    memory_root.mkdir()
+
+    brain = ClaudeSDKBrain.with_tools(
+        cwd=repo,
+        memory_root=memory_root,
+        github_repo="Obsidian-Owl/reachy-ducky",
+    )
+    reviewer = PRReviewer(
+        brain=brain,
+        repo=repo,
+        owner="Obsidian-Owl",
+        repo_name="reachy-ducky",
+    )
+    response = await reviewer.review(pr_number=46)
+
+    assert response.name == "pr-reviewer"
+    assert response.summary  # brain returned *something* non-empty
