@@ -3,18 +3,25 @@ members = ["daemon", "app", "menubar", "protocol"]
 
 # Upstream ``gstreamer-libs`` ships divergent ``Requires-Dist`` across
 # platform wheels (macOS wheel lists only ``setuptools``; Windows
-# wheels additionally list ``gstreamer-msvc-runtime``). No sdist.
+# wheels additionally list ``gstreamer-msvc-runtime``) (no sdist
+# published at time of writing on 1.28.x).
 # uv picks one wheel's metadata as the universal value, which on
 # macOS / Linux incorrectly requires ``gstreamer-msvc-runtime`` — a
 # Windows-only package with no matching sdist / non-win wheel.
 #
 # This override patches the ``Requires-Dist`` to match the ACTUAL
-# per-wheel graph. Mirrors the intent of pollen-robotics/
-# reachy_mini_conversation_app's workaround, but with ``version``
-# omitted so it applies to ALL versions of ``gstreamer-libs`` (the
-# upstream bug persists across versions; Pollen's verbatim pin at
-# 1.28.1 is lock-state, not intentional). Remove when upstream
-# unifies wheel metadata or publishes an sdist. Tracked in #61.
+# per-wheel graph. Mirrors the intent of pollen-robotics/reachy_mini_conversation_app
+# @ebfee42c9dd22a3075b9c8d30fc14018366a8f1b (fetch date 2026-04-22)
+# but with ``version`` omitted so the override applies to all affected
+# versions (Pollen's verbatim version pin at 1.28.1 is lock-state, not
+# intentional). Remove when upstream unifies wheel metadata or
+# publishes an sdist. Tracked in #61.
+#
+# Empirically, on ``reachy-mini==1.6.4``, only ``gstreamer-libs``
+# carries the bad marker — the single-entry override suffices. If a
+# future ``reachy-mini`` upgrade resurfaces the same bug on
+# ``gstreamer-bundle`` or another sibling, add entries rather than
+# widen this one.
 [tool.uv]
 dependency-metadata = [
     { name = "gstreamer-libs", requires-dist = ["gstreamer-msvc-runtime; sys_platform == 'win32'", "setuptools"] },
