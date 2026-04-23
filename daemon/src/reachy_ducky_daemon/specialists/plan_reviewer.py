@@ -43,16 +43,7 @@ from pathlib import Path
 from reachy_ducky_protocol.messages import BrainRequest, SpecialistResponse
 
 from reachy_ducky_daemon.brain.interface import BrainInterface
-
-# Reuse the module-private plan-discovery helper from plans_mcp. Importing
-# by its underscore name across modules is unconventional but here it's
-# deliberate: promoting ``_list_plans`` to a public ``list_plans`` would
-# require touching every existing test import, and duplicating the logic
-# would create a drift surface between specialist and MCP tool.
-# TODO(#4): promote `_list_plans` to public `list_plans` before the 2nd
-# Phase A specialist lands, so this cross-subpackage private import doesn't
-# become precedent.
-from reachy_ducky_daemon.brain.plans_mcp import _list_plans
+from reachy_ducky_daemon.brain.plans_mcp import list_plans
 from reachy_ducky_daemon.specialists.redaction import RedactionError, redact
 
 __all__ = ["PlanReviewer"]
@@ -149,7 +140,7 @@ def _collect_plans(repo: Path) -> list[tuple[str, str]]:
     """Return ``[(relative_path, contents)]`` for every plan file under ``repo``.
 
     Files whose ``read_text`` raises (non-UTF-8, vanished between the
-    ``_list_plans`` walk and the read, permission denied, etc.) are
+    ``list_plans`` walk and the read, permission denied, etc.) are
     skipped silently — the assembled prompt already includes the file's
     path via neighbouring plan files or via the missing-plans
     diagnostic, and bubbling the error up would defeat the "no
@@ -160,7 +151,7 @@ def _collect_plans(repo: Path) -> list[tuple[str, str]]:
     # header. Current silent skip is asymmetric with `_capture_diff` and
     # `_current_branch` (both surface errors as diagnostics).
     out: list[tuple[str, str]] = []
-    for rel in _list_plans(repo):
+    for rel in list_plans(repo):
         try:
             content = (repo / rel).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):

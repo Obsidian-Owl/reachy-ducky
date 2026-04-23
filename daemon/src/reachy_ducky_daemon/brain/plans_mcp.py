@@ -28,7 +28,7 @@ anywhere readable. Closing over the resolved root inside the tool factory
 makes that forgery impossible — the parameter simply does not exist on the
 tool's input schema.
 
-Single source of truth. Both layers call :func:`_discover` — ``_list_plans``
+Single source of truth. Both layers call :func:`_discover` — ``list_plans``
 returns its output as relative POSIX strings, and ``_read_plan`` validates by
 checking membership in the same set. This collapses what used to be two
 matchers (``Path.glob`` for discovery, ``PurePath.match`` for validation) into
@@ -36,11 +36,11 @@ one, which matters because those two engines are NOT parity-equivalent:
 
 * ``PurePath.match("docs/plans/**/*.md")`` rejects ``docs/plans/a/b/c/d.md``
   that ``Path.glob("docs/plans/**/*.md")`` finds — under-approximation, making
-  ``_read_plan`` deny paths ``_list_plans`` advertised.
+  ``_read_plan`` deny paths ``list_plans`` advertised.
 * ``PurePath.match("AGENTS.md")`` is a **tail match** (no leading anchor), so
   ``nested/AGENTS.md`` matches even though ``base.glob("AGENTS.md")`` only
   matches at the root — over-approximation, making attacker-droppable files
-  readable even though ``_list_plans`` wouldn't advertise them. That was the
+  readable even though ``list_plans`` wouldn't advertise them. That was the
   security widening we are eliminating here.
 
 One ``_discover`` call per ``_read_plan`` is slightly more expensive than a
@@ -77,13 +77,14 @@ from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
 
 __all__ = [
+    "list_plans",
     "plans_mcp_server",
 ]
 
 # Conventional plan/spec locations. This set is the read surface of
 # ``read_plan``; widening it widens what the brain can read via this server.
 #
-# ``Path.glob`` is the canonical matcher: both ``_list_plans`` (discovery) and
+# ``Path.glob`` is the canonical matcher: both ``list_plans`` (discovery) and
 # ``_read_plan`` (validation) resolve paths through :func:`_discover`, which
 # uses this pattern list. ``fnmatch`` / ``PurePath.match`` are deliberately NOT
 # used: the former has no recursive ``**`` operator and the latter is a tail
@@ -103,7 +104,7 @@ def _discover(base: Path) -> set[Path]:
     """Return the absolute paths of every file under ``base`` matched by any
     conventional pattern.
 
-    The single source of truth for both :func:`_list_plans` (discovery) and
+    The single source of truth for both :func:`list_plans` (discovery) and
     :func:`_read_plan` (validation). ``Path.glob`` handles ``**`` correctly
     (including the zero-intermediate-dir case) and anchors each pattern to
     ``base`` — i.e. ``base.glob("AGENTS.md")`` matches only ``base/AGENTS.md``,
@@ -120,7 +121,7 @@ def _discover(base: Path) -> set[Path]:
     return results
 
 
-def _list_plans(project_root: Path) -> list[str]:
+def list_plans(project_root: Path) -> list[str]:
     """Return sorted, deduplicated project-relative paths to conventional plans.
 
     Pure helper, testable without the SDK. ``set``-based dedup handles the
@@ -158,7 +159,7 @@ def _read_plan(project_root: Path, rel_path: str) -> str:
         raise PermissionError(f"path escapes project root: {rel_path}") from exc
 
     if target not in _discover(base):
-        # Single source of truth: the target must be something _list_plans
+        # Single source of truth: the target must be something list_plans
         # would advertise. ``_discover`` only returns files that exist, so a
         # missing file here falls into this branch rather than a separate
         # FileNotFoundError check.
@@ -194,14 +195,14 @@ def _make_plans_tools(project_root: Path) -> tuple[SdkMcpTool[Any], SdkMcpTool[A
         {},
     )
     async def find_plans(_args: dict[str, Any]) -> dict[str, Any]:
-        """MCP ``find_plans`` wrapper: format :func:`_list_plans` as a text block.
+        """MCP ``find_plans`` wrapper: format :func:`list_plans` as a text block.
 
         Catches ``OSError`` (filesystem errors during ``resolve()`` / ``glob``)
         and ``ValueError`` (null bytes, etc.) so the handler never raises — the
         SDK dispatcher can rely on a well-formed response.
         """
         try:
-            paths = _list_plans(resolved_root)
+            paths = list_plans(resolved_root)
         except (OSError, ValueError) as exc:
             return {
                 "content": [{"type": "text", "text": f"error: failed to list plans: {exc}"}],
