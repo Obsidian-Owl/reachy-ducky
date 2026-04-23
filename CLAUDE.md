@@ -28,7 +28,8 @@ On the robot only: `uv sync --all-packages --extra robot` additionally installs 
 The thinking brain spawns external MCP servers:
 
 - **Node.js 20+** — required for `npx -y github-mcp-server` (declared in `.mcp.json`).
-- **`GITHUB_PERSONAL_ACCESS_TOKEN`** env var — `repo:read` + `pull_requests:read` + `issues:read` scopes are sufficient for read-only operation.
+- **`gh` CLI (2.x)** — required by the `pr-reviewer` specialist for deterministic pre-fetch (`gh pr view`, `gh pr diff`, `gh api`). Authenticates via `GH_TOKEN` (reuse `GITHUB_PERSONAL_ACCESS_TOKEN`) or an interactive `gh auth login`.
+- **`GITHUB_PERSONAL_ACCESS_TOKEN`** env var — `repo:read` + `pull_requests:read` + `issues:read` scopes are sufficient for read-only operation. Shared by `github-mcp-server` (brain tool surface) and `gh` (pr-reviewer pre-fetch).
 - **`REACHY_DUCKY_AUTH_TOKEN`** — bearer token if exposing the daemon over LAN; see `.claude/rules/` and the design doc §5.
 
 Live-Claude integration tests run via `.github/workflows/integration.yml` (PR-with-`integration`-label or weekly cron) using the `CLAUDE_CODE_OAUTH_TOKEN` org secret.

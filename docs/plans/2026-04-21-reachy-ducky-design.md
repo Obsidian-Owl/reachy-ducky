@@ -232,7 +232,9 @@ Ship-first scope, aimed at roughly one to two weeks of focused work.
 5. **Reachy Mini app skeleton.** `VoiceInterface` with OpenAI Realtime + `fastrtc`. Wake word from community Space. Hard-mute with menu-bar indicator. On-demand conversational mode only.
 6. **Embodiment minimum:** `play_move` on state transitions (listening/thinking/muted), `look_at_image` gaze to user. No idle breathing yet; no urgent/soft-nudge tiers yet (that's phase C).
 
-**Deferred to phase B:** `fswatch`/git-ref event watcher, specialists 2–4 (`test-gap-assessor`, `scope-creep-detector`, `pr-reviewer`).
+**Deferred to phase B:** `fswatch`/git-ref event watcher, specialists `test-gap-assessor` and `scope-creep-detector`.
+
+**Landed in phase B (2026-04-23):** `pr-reviewer` — see `docs/plans/2026-04-23-pr-reviewer-specialist.md`.
 
 **Deferred to phase C:** Claude Code / Codex hooks, `agent-trace-critic`, interruption policy with severity tiers, per-project overrides.
 
