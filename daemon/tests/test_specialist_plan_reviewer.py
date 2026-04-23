@@ -17,10 +17,12 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from reachy_ducky_daemon.brain.mock import MockBrain
 from reachy_ducky_daemon.specialists.plan_reviewer import PlanReviewer
+from reachy_ducky_daemon.specialists.redaction import RedactionError
 from reachy_ducky_protocol.messages import SpecialistResponse
 
 # ---------------------------------------------------------------------------
@@ -320,3 +322,60 @@ async def test_plan_reviewer_live_claude(repo_with_plan_and_drift: Path) -> None
 
     assert response.name == "plan-reviewer"
     assert response.summary  # non-empty
+
+
+# ---------------------------------------------------------------------------
+# Redaction integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_plan_reviewer_redacts_prompt_before_brain_query(
+    repo_with_plan_and_drift: Path,
+) -> None:
+    """Prompt reaching the brain is the redacted version; rule ids flow to flags."""
+    # Inject a sensitive-looking token into the plan so we can observe it
+    # being scrubbed. Fresh tmp_path per test — safe to mutate.
+    plan_path = repo_with_plan_and_drift / "docs" / "plans" / "foo.md"
+    plan_path.write_text(plan_path.read_text() + "\nsensitive token here\n")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=repo_with_plan_and_drift)
+
+    def _fake_redact(text: str, *, cwd: Path) -> tuple[str, list[str]]:
+        assert cwd == repo_with_plan_and_drift
+
+        return text.replace("sensitive token here", "[REDACTED:fake-rule]"), ["fake-rule"]
+
+    with patch(
+        "reachy_ducky_daemon.specialists.plan_reviewer.redact",
+        side_effect=_fake_redact,
+    ):
+        response = await reviewer.review()
+
+    assert len(brain.calls) == 1
+    prompt = brain.calls[0].user_utterance
+    assert "sensitive token here" not in prompt
+    assert "[REDACTED:fake-rule]" in prompt
+    assert "redacted:fake-rule" in response.flags
+
+
+@pytest.mark.asyncio
+async def test_plan_reviewer_aborts_on_redaction_failure(
+    repo_with_plan_and_drift: Path,
+) -> None:
+    """RedactionError → 200 SpecialistResponse with redaction-failed flag, no brain call."""
+    brain = MockBrain()
+    reviewer = PlanReviewer(brain=brain, repo=repo_with_plan_and_drift)
+
+    with patch(
+        "reachy_ducky_daemon.specialists.plan_reviewer.redact",
+        side_effect=RedactionError("gitleaks binary not found"),
+    ):
+        response = await reviewer.review()
+
+    assert response.name == "plan-reviewer"
+    assert "redaction-failed" in response.flags
+    assert "gitleaks binary not found" in response.summary
+    assert "abort" in response.summary.lower() or "unavailable" in response.summary.lower()
+    assert len(brain.calls) == 0, "brain.query must not fire when redaction fails"

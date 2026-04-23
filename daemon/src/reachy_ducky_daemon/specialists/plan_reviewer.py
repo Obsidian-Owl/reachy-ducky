@@ -53,6 +53,7 @@ from reachy_ducky_daemon.brain.interface import BrainInterface
 # Phase A specialist lands, so this cross-subpackage private import doesn't
 # become precedent.
 from reachy_ducky_daemon.brain.plans_mcp import _list_plans
+from reachy_ducky_daemon.specialists.redaction import RedactionError, redact
 
 __all__ = ["PlanReviewer"]
 
@@ -235,9 +236,12 @@ class PlanReviewer:
         self._repo = repo
 
     async def review(self) -> SpecialistResponse:
-        """Assemble the review prompt, dispatch to the brain, wrap the response.
+        """Assemble the review prompt, redact secrets, dispatch to the brain.
 
-        Exactly one ``brain.query`` call per invocation.
+        Exactly one ``brain.query`` call per invocation — but only when
+        redaction succeeds. A :class:`RedactionError` short-circuits to
+        a fail-closed diagnostic response; no brain call fires, no
+        secret leaks.
         """
         branch, branch_error = _current_branch(self._repo)
         plans = _collect_plans(self._repo)
@@ -251,5 +255,21 @@ class PlanReviewer:
             diff_error=diff_error,
         )
 
-        response = await self._brain.query(BrainRequest(user_utterance=prompt))
-        return SpecialistResponse(name=_SPECIALIST_NAME, summary=response.text)
+        try:
+            redacted, rule_ids = redact(prompt, cwd=self._repo)
+        except RedactionError as exc:
+            return SpecialistResponse(
+                name=_SPECIALIST_NAME,
+                summary=(
+                    f"Redaction unavailable: {exc}. Aborting review to "
+                    "prevent secret leaks — re-run once the redactor is back."
+                ),
+                flags=["redaction-failed"],
+            )
+
+        response = await self._brain.query(BrainRequest(user_utterance=redacted))
+        return SpecialistResponse(
+            name=_SPECIALIST_NAME,
+            summary=response.text,
+            flags=[f"redacted:{rid}" for rid in rule_ids],
+        )
