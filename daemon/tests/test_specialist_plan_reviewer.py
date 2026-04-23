@@ -530,7 +530,18 @@ async def test_per_file_cap_truncates_individual_plans(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_total_cap_drops_remaining_plans(tmp_path: Path) -> None:
-    """Plans beyond max_total_plan_chars are replaced by an omission marker."""
+    """Plans beyond max_total_plan_chars are replaced by an omission marker.
+
+    Asserts the full policy, not just the marker's presence:
+
+    * Insertion order of the plans that *do* land is preserved
+      (``p0 < p1 < p2``).
+    * The last plan is omitted (``p4.md`` does not appear).
+    * The marker names the exact remaining count (``"2 plans omitted"``;
+      grammatically plural since two are dropped).
+    * The marker sits *after* the last included plan, not before —
+      proving the early-exit ordering rather than a stray substring.
+    """
     _init_repo(tmp_path)
     plans_dir = tmp_path / "docs" / "plans"
     plans_dir.mkdir(parents=True)
@@ -549,11 +560,17 @@ async def test_total_cap_drops_remaining_plans(tmp_path: Path) -> None:
     await reviewer.review()
 
     prompt = brain.calls[-1].user_utterance
-    # At least one plan landed (early ones) and at least one was omitted.
+    # At least the first plan landed and the budget number is named.
     assert "p0.md" in prompt
-    # Omission marker present somewhere in the prompt.
-    assert "plan(s) omitted" in prompt
-    assert "200000" in prompt  # the budget number is named in the marker
+    assert "200000" in prompt
+    # Ordering property: insertion order preserved for included plans.
+    assert prompt.index("p0.md") < prompt.index("p1.md") < prompt.index("p2.md")
+    # Last-plan-dropped property: p4 is past the budget, so it never appears.
+    assert "p4.md" not in prompt
+    # Exact count in marker — 5 plans in, 3 land, 2 are omitted.
+    assert "2 plans omitted" in prompt
+    # Position property: marker follows the last included plan, not precedes it.
+    assert prompt.index("p2.md") < prompt.index("plans omitted")
 
 
 def test_caps_have_sensible_defaults(tmp_path: Path) -> None:

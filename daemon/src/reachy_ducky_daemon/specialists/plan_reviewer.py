@@ -200,7 +200,8 @@ def _assemble_plans_block(
     Concatenates plan bodies in order; once the cumulative body length
     would exceed ``max_total_chars`` (after at least one plan has
     landed), appends a single ``[... N plan(s) omitted ...]`` marker
-    and stops. The ``(no plans)`` branch is unchanged.
+    (``plan`` / ``plans`` grammatically matched to ``N``) and stops.
+    The ``(no plans)`` branch is unchanged.
 
     The "at least one plan included" guard means a single oversized
     plan (longer than the total budget) still lands — so the brain
@@ -219,16 +220,19 @@ def _assemble_plans_block(
     used = 0
     included = 0
     for rel, body in plans:
-        block = f"--- {rel} ---\n{body.rstrip(chr(10))}\n"
+        body_clean = body.rstrip("\n")
+        block = f"--- {rel} ---\n{body_clean}\n"
+        # Guarantee at least one plan lands even if it exceeds the budget alone —
+        # per-file truncation in _collect_plans bounds that worst case.
         if used + len(block) > max_total_chars and included > 0:
             remaining = len(plans) - included
+            plan_word = "plan" if remaining == 1 else "plans"
             parts.append(
-                f"[... {remaining} plan(s) omitted: total body "
+                f"[... {remaining} {plan_word} omitted: total body "
                 f"budget of {max_total_chars} chars exhausted ...]",
             )
             break
-        parts.append(f"--- {rel} ---")
-        parts.append(body.rstrip("\n"))
+        parts.append(block.rstrip("\n"))
         parts.append("")
         used += len(block)
         included += 1
@@ -330,6 +334,15 @@ class PlanReviewer:
         ``[... N plan(s) omitted ...]`` marker. Calibrated against
         Claude's 200k-token context — chars × ~4-bytes-per-token leaves
         headroom for the diff, the brain's response, and other sections.
+
+        Intended invariant: ``max_plan_chars <= max_total_plan_chars``.
+        This is not enforced at construction (individual reviewers may
+        deliberately tune one cap above the other), but worst-case
+        overshoot of the total budget is bounded at
+        ``max_total_plan_chars + max_plan_chars`` because the per-file
+        truncation in :func:`_collect_plans` caps any single plan's
+        contribution before it reaches the total-budget check in
+        :func:`_assemble_plans_block`.
 
         Both caps are keyword-only so a future signature evolution can
         add positional kwargs without ambiguity. (#2)
