@@ -110,14 +110,29 @@ def _discover(base: Path) -> set[Path]:
     ``base`` — i.e. ``base.glob("AGENTS.md")`` matches only ``base/AGENTS.md``,
     not ``base/nested/AGENTS.md``. That anchoring is what makes the read
     surface exactly as wide as the discover surface.
+
+    Symlink-escape filter: a hit whose ``.resolve()`` lands outside ``base`` is
+    silently dropped. The plans MCP tool surface — :func:`list_plans`
+    (discovery) and :func:`_read_plan` (read with membership check) — both
+    read from this set, so neither can return or accept an escape-resolving
+    path. Closed via #8.
     """
     results: set[Path] = set()
     for pattern in _CONVENTIONAL_PATTERNS:
         for hit in base.glob(pattern):
-            if hit.is_file():
-                # Resolve so symlink-based dedup and membership tests agree
-                # with the resolved ``target`` computed in ``_read_plan``.
-                results.add(hit.resolve())
+            if not hit.is_file():
+                continue
+            resolved = hit.resolve()
+            # Reject symlinks whose resolved target escapes ``base``.
+            # ``is_relative_to`` (Python 3.9+) is the non-raising form
+            # of the same check ``_read_plan`` uses. Filtering here
+            # means both ``list_plans`` (discovery) and ``_read_plan``
+            # (membership check) inherit the property for free — no
+            # escaping path can be advertised, read, or leaked via
+            # diagnostic. (#8)
+            if not resolved.is_relative_to(base):
+                continue
+            results.add(resolved)
     return results
 
 

@@ -685,3 +685,59 @@ async def test_plans_mcp_server_dispatches_through_registered_handlers(
     read_block = read_payload.content[0]
     assert isinstance(read_block, mcp_types.TextContent)
     assert read_block.text == "alpha plan"
+
+
+# ---------------------------------------------------------------------------
+# M2 Task 2.1 — _discover filters paths resolving outside project_root (#8)
+# ---------------------------------------------------------------------------
+
+
+def test_discover_rejects_escaped_symlink(tmp_path: Path) -> None:
+    """A symlink under docs/plans/ that resolves outside project_root is dropped.
+
+    Security property: a plan-shaped path whose ``.resolve()`` escapes
+    ``base`` cannot be advertised by ``list_plans`` or read by
+    ``_read_plan``. Enforced in ``_discover`` so both inherit the
+    filter for free — no escaping path can be advertised, read, or
+    leaked via diagnostic.
+    """
+    # Create a real file outside the project root.
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret content")
+
+    # Create a project with docs/plans/, a legitimate plan, and an
+    # escape symlink at the same conventional location.
+    project = tmp_path / "project"
+    plans_dir = project / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    (plans_dir / "ok.md").write_text("# Legitimate plan\n")
+    escape = plans_dir / "escape.md"
+    escape.symlink_to(outside)
+
+    listed = list_plans(project)
+
+    assert "docs/plans/ok.md" in listed
+    assert "docs/plans/escape.md" not in listed
+    # Defensive: nothing in the list should reference the outside path.
+    assert not any("outside" in p for p in listed)
+
+
+def test_read_plan_rejects_escaped_symlink(tmp_path: Path) -> None:
+    """``_read_plan`` refuses a symlink that resolves outside project_root.
+
+    Two fail-closed gates cover this: ``_read_plan``'s own
+    ``relative_to(base)`` check fires first (yielding "escapes project
+    root"), and even if that were ever bypassed, ``_discover``'s new
+    ``is_relative_to`` filter keeps the resolved path out of the
+    membership set. Either way, no ValueError leaks out of
+    ``_read_plan`` and the fail-closed contract is intact.
+    """
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret content")
+    project = tmp_path / "project"
+    plans_dir = project / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+    (plans_dir / "escape.md").symlink_to(outside)
+
+    with pytest.raises(PermissionError, match="escapes project root|not a plan"):
+        _read_plan(project, "docs/plans/escape.md")
