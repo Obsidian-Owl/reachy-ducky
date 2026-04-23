@@ -53,7 +53,7 @@ testpaths = ["daemon/tests", "app/tests", "menubar/tests", "protocol/tests"]
 asyncio_mode = "auto"
 # Deselect tiers that need external setup by default. Opt in via
 # `-m <marker>`. Markers are declared below.
-addopts = "-m 'not sim and not hardware'"
+addopts = "-m 'not sim and not hardware and not integration'"
 markers = [
     "hardware: requires Reachy Mini hardware reachable (LAN for Wireless, USB for Lite)",
     "integration: requires live external APIs",
