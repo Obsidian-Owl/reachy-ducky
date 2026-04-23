@@ -21,7 +21,12 @@ from reachy_ducky_app.wake import MockWakeDetector
 
 
 def test_reachy_ducky_app_imports_cleanly() -> None:
-    """``ReachyDuckyApp`` + ``main`` import without the robot extra installed."""
+    """``ReachyDuckyApp`` + ``main`` import cleanly on dev venvs.
+
+    ``reachy_mini`` is a plain base dep, but module-load must not trigger
+    heavy WebRTC / media-pipeline imports (structural-shape pattern in
+    ``main.py``).
+    """
     assert ReachyDuckyApp is not None
     assert callable(main)
 

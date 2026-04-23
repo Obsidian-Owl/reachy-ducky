@@ -2,8 +2,10 @@
 
 ``MotionDriver`` is the ABC the :class:`EmbodimentStateMachine` talks to.
 ``MockMotionDriver`` records calls for unit tests. ``ReachyMotionDriver``
-wraps a real ``reachy_mini.ReachyMini`` instance and is only instantiable
-on the robot where the ``robot`` extra is installed.
+wraps a real ``reachy_mini.ReachyMini`` instance. ``reachy_mini`` is a
+plain base dep (see ``app/pyproject.toml``), so the driver is importable
+everywhere; the ``reachy_mini: object`` parameter shape is duck-typed so
+unit tests can pass a ``MockReachyMini`` without depending on the live SDK.
 """
 
 from __future__ import annotations
