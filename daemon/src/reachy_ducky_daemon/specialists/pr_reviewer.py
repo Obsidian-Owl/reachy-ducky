@@ -24,6 +24,7 @@ from pathlib import Path
 from reachy_ducky_protocol.messages import BrainRequest, SpecialistResponse
 
 from reachy_ducky_daemon.brain.interface import BrainInterface
+from reachy_ducky_daemon.specialists.redaction import RedactionError, redact
 
 __all__ = [
     "_GH_TIMEOUT_SECONDS",
@@ -544,9 +545,8 @@ class PRReviewer:
             comments_error=comments_err,
             check_runs_error=check_runs_err,
         )
-        flags = _derive_flags(pr=pr_meta, comments=comments, check_runs=check_runs)
-        brain_resp = await self._brain.query(BrainRequest(user_utterance=prompt))
-        return SpecialistResponse(name=_SPECIALIST_NAME, summary=brain_resp.text, flags=flags)
+        base_flags = _derive_flags(pr=pr_meta, comments=comments, check_runs=check_runs)
+        return await self._query_with_redaction(prompt=prompt, base_flags=base_flags)
 
     async def _diagnostic_response(
         self,
@@ -555,15 +555,53 @@ class PRReviewer:
         branch_error: str | None,
         find_error: str | None,
     ) -> SpecialistResponse:
-        """Dispatch the diagnostic prompt and wrap the brain's reply."""
+        """Dispatch the diagnostic prompt (redacted) and wrap the brain's reply."""
         prompt = _assemble_diagnostic_prompt(
             branch=branch or "unknown",
             branch_error=branch_error,
             find_error=find_error,
         )
-        flags = _derive_flags(pr={}, comments=[], check_runs=[])
-        brain_resp = await self._brain.query(BrainRequest(user_utterance=prompt))
-        return SpecialistResponse(name=_SPECIALIST_NAME, summary=brain_resp.text, flags=flags)
+        base_flags = _derive_flags(pr={}, comments=[], check_runs=[])
+        return await self._query_with_redaction(prompt=prompt, base_flags=base_flags)
+
+    async def _query_with_redaction(
+        self,
+        *,
+        prompt: str,
+        base_flags: list[str],
+    ) -> SpecialistResponse:
+        """Redact, then query brain. Fail-closed on :class:`RedactionError`.
+
+        Shared by both the happy review path and the diagnostic path so
+        every prompt that reaches ``brain.query()`` is run through
+        :func:`redact` first (design doc §10). ``RedactionError`` short-
+        circuits to a 200 ``SpecialistResponse`` with a
+        ``redaction-failed`` flag and no brain call — secrets cannot
+        leak through a broken gitleaks install.
+
+        ``base_flags`` are preserved on both success (merged with
+        ``redacted:<rid>`` entries) and failure (merged with
+        ``redaction-failed``) so the caller still sees the objective
+        state we determined without the brain.
+        """
+        try:
+            redacted, rule_ids = redact(prompt)
+        except RedactionError as exc:
+            return SpecialistResponse(
+                name=_SPECIALIST_NAME,
+                summary=(
+                    f"Redaction unavailable: {exc}. Aborting review to "
+                    "prevent secret leaks — re-run once the redactor is back."
+                ),
+                flags=[*base_flags, "redaction-failed"],
+            )
+
+        brain_resp = await self._brain.query(BrainRequest(user_utterance=redacted))
+        return SpecialistResponse(
+            name=_SPECIALIST_NAME,
+            summary=brain_resp.text,
+            flags=[*base_flags, *(f"redacted:{rid}" for rid in rule_ids)],
+        )
 
     def _resolve_pr(self, pr_number: int | None) -> tuple[int | None, str, str | None, str | None]:
         """Return ``(pr, branch, branch_error, find_error)`` per the resolution order.

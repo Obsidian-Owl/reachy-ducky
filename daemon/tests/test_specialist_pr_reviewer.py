@@ -612,9 +612,20 @@ def _mock_by_argv(
     Longer patterns take precedence over shorter ones — important for
     distinguishing ``gh api /repos/.../pulls/.../comments`` from
     ``gh api /repos/.../commits/.../check-runs``.
+
+    A default no-findings ``gitleaks stdin`` response is merged in so
+    existing tests (written before redaction wiring landed) dispatch
+    cleanly without touching each case. Tests that want to observe
+    redaction-specific behavior can override by supplying their own
+    ``("gitleaks", "stdin")`` entry, or by patching
+    ``pr_reviewer.redact`` directly.
     """
+    defaults: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {
+        ("gitleaks", "stdin"): _ok("[]"),
+    }
+    merged = {**defaults, **returns}
     # Sort keys by length descending so the most specific match wins.
-    ordered = sorted(returns.items(), key=lambda kv: -len(kv[0]))
+    ordered = sorted(merged.items(), key=lambda kv: -len(kv[0]))
 
     def _side_effect(
         argv: list[str], *args: Any, **kwargs: Any
@@ -870,3 +881,141 @@ async def test_pr_reviewer_live_claude(tmp_path: Path) -> None:
 
     assert response.name == "pr-reviewer"
     assert response.summary  # brain returned *something* non-empty
+
+
+# ---------------------------------------------------------------------------
+# Redaction integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pr_reviewer_redacts_happy_path(tmp_path: Path) -> None:
+    """Happy path: prompt the brain sees is the redacted version; rule ids flagged."""
+    pr_view = _FIXTURES / "gh_pr_view_happy.json"
+    comments = _FIXTURES / "gh_api_comments.json"
+    check_runs = _FIXTURES / "gh_api_check_runs.json"
+
+    side_effect = _mock_by_argv(
+        {
+            ("gh", "pr", "view"): _ok(pr_view.read_text()),
+            ("gh", "pr", "diff"): _ok("diff context\nsensitive_token_here\nmore diff\n"),
+            (
+                "gh",
+                "api",
+                "/repos/Obsidian-Owl/reachy-ducky/pulls/42/comments",
+            ): _ok(comments.read_text()),
+            (
+                "gh",
+                "api",
+                "/repos/Obsidian-Owl/reachy-ducky/commits/abc123def456/check-runs",
+            ): _ok(check_runs.read_text()),
+        }
+    )
+
+    def _fake_redact(text: str) -> tuple[str, list[str]]:
+        return text.replace("sensitive_token_here", "[REDACTED:fake-rule]"), ["fake-rule"]
+
+    brain = MockBrain()
+    reviewer = PRReviewer(
+        brain=brain,
+        repo=tmp_path,
+        owner="Obsidian-Owl",
+        repo_name="reachy-ducky",
+    )
+    with (
+        patch("subprocess.run", side_effect=side_effect),
+        patch(
+            "reachy_ducky_daemon.specialists.pr_reviewer.redact",
+            side_effect=_fake_redact,
+        ),
+    ):
+        response = await reviewer.review(pr_number=42)
+
+    assert "sensitive_token_here" not in brain.calls[0].user_utterance
+    assert "[REDACTED:fake-rule]" in brain.calls[0].user_utterance
+    assert "redacted:fake-rule" in response.flags
+    # Existing derived flags preserved — flag list is a union, not a replacement.
+    assert "ci-red" in response.flags
+    assert "has-unresolved-comments" in response.flags
+
+
+@pytest.mark.asyncio
+async def test_pr_reviewer_redacts_diagnostic_path(tmp_path: Path) -> None:
+    """Diagnostic (no-PR-found) path also redacts.
+
+    branch_error / find_error / stderr strings can legitimately embed
+    credentials (auth URLs with tokens, etc.), so the fail-closed
+    posture must cover the diagnostic path too.
+    """
+    side_effect = _mock_by_argv(
+        {
+            ("git", "rev-parse", "--abbrev-ref", "HEAD"): _ok("feat-x\n"),
+            # gh pr list fails with a stderr that embeds a credential-ish URL.
+            ("gh", "pr", "list"): subprocess.CompletedProcess(
+                args=[],
+                returncode=1,
+                stdout="",
+                stderr="remote: url https://x:sensitive_token_here@github.com/...",
+            ),
+        }
+    )
+
+    def _fake_redact(text: str) -> tuple[str, list[str]]:
+        return text.replace("sensitive_token_here", "[REDACTED:fake-rule]"), ["fake-rule"]
+
+    brain = MockBrain()
+    reviewer = PRReviewer(
+        brain=brain,
+        repo=tmp_path,
+        owner="Obsidian-Owl",
+        repo_name="reachy-ducky",
+    )
+    with (
+        patch("subprocess.run", side_effect=side_effect),
+        patch(
+            "reachy_ducky_daemon.specialists.pr_reviewer.redact",
+            side_effect=_fake_redact,
+        ),
+    ):
+        response = await reviewer.review(pr_number=None)
+
+    assert "sensitive_token_here" not in brain.calls[0].user_utterance
+    assert "[REDACTED:fake-rule]" in brain.calls[0].user_utterance
+    assert "redacted:fake-rule" in response.flags
+    assert "no-pr-found" in response.flags
+
+
+@pytest.mark.asyncio
+async def test_pr_reviewer_aborts_on_redaction_failure(tmp_path: Path) -> None:
+    """RedactionError on the happy path → 200 response, redaction-failed flag, no brain call."""
+    from reachy_ducky_daemon.specialists.redaction import RedactionError
+
+    pr_view = _FIXTURES / "gh_pr_view_happy.json"
+    side_effect = _mock_by_argv(
+        {
+            ("gh", "pr", "view"): _ok(pr_view.read_text()),
+            ("gh", "pr", "diff"): _ok(""),
+            ("gh", "api"): _ok("[]"),
+        }
+    )
+
+    brain = MockBrain()
+    reviewer = PRReviewer(
+        brain=brain,
+        repo=tmp_path,
+        owner="Obsidian-Owl",
+        repo_name="reachy-ducky",
+    )
+    with (
+        patch("subprocess.run", side_effect=side_effect),
+        patch(
+            "reachy_ducky_daemon.specialists.pr_reviewer.redact",
+            side_effect=RedactionError("gitleaks timeout after 30.0s"),
+        ),
+    ):
+        response = await reviewer.review(pr_number=42)
+
+    assert response.name == "pr-reviewer"
+    assert "redaction-failed" in response.flags
+    assert "timeout" in response.summary.lower()
+    assert len(brain.calls) == 0, "brain.query must not fire when redaction fails"
