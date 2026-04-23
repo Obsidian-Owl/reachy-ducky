@@ -11,6 +11,8 @@ hit real hardware.
 from __future__ import annotations
 
 import inspect
+import logging
+import time
 
 import numpy as np
 import pytest
@@ -39,6 +41,11 @@ def test_media_manager_exposes_audio_sample_methods() -> None:
     ``ReachySpeakerSink`` implementations. Introspecting the class directly
     (not an instance) keeps this in the default tier with no live-robot
     requirement — catches the rename in CI before it hits hardware.
+
+    For ``get_audio_sample`` we pin "callable with no args" rather than
+    "exactly one parameter" — the real drift concern is the SDK growing
+    a required argument we don't supply, not adding a keyword arg with
+    a default (which keeps our call site working).
     """
     assert hasattr(MediaManager, "get_audio_sample"), (
         "MediaManager.get_audio_sample missing — ReachyMicSource can't source frames"
@@ -46,56 +53,74 @@ def test_media_manager_exposes_audio_sample_methods() -> None:
     assert hasattr(MediaManager, "push_audio_sample"), (
         "MediaManager.push_audio_sample missing — ReachySpeakerSink can't sink frames"
     )
-    # Also pin the parameterless call shape of get_audio_sample — we
-    # rely on calling it with no arguments. Signature check is class-
-    # level safe (``inspect.signature`` doesn't need an instance).
     sig = inspect.signature(MediaManager.get_audio_sample)
-    # self is the only parameter; no caller-supplied args.
-    assert len(sig.parameters) == 1, (
-        f"MediaManager.get_audio_sample unexpectedly accepts "
-        f"{list(sig.parameters)}; ReachyMicSource calls it with no args"
+    params = list(sig.parameters.values())
+    assert params and params[0].name == "self", (
+        f"MediaManager.get_audio_sample signature unexpected: {sig}"
+    )
+    non_self_required = [
+        p
+        for p in params[1:]
+        if p.default is inspect.Parameter.empty
+        and p.kind
+        not in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        )
+    ]
+    assert not non_self_required, (
+        f"get_audio_sample grew a required parameter we don't supply: "
+        f"{[p.name for p in non_self_required]}"
     )
 
 
 @pytest.mark.hardware
 def test_get_audio_sample_returns_non_empty_buffer() -> None:
-    """get_audio_sample returns a non-empty PCM buffer.
+    """``get_audio_sample`` eventually yields a non-empty float32 buffer.
 
-    Exact dtype/shape asserted in the refinement pass after Step 1
-    introspection. Today we pin only ``truthy``/``non-empty``.
+    The SDK documents ``Optional[NDArray[np.float32]]`` — ``None`` is a
+    legitimate "GStreamer ring buffer has no data yet" response,
+    especially on a fresh ``ReachyMini()`` where audio hasn't started
+    flowing. Polls up to 2s so this pins "the method eventually yields"
+    rather than "the method returns non-None on the first call"
+    (which would race).
     """
     mini = ReachyMini()
-    sample = mini.media.get_audio_sample()
-    assert sample is not None, "get_audio_sample returned None"
-    # bytes → len > 0; np.ndarray → size > 0
-    length = len(sample) if hasattr(sample, "__len__") else sample.size
-    assert length > 0, f"get_audio_sample returned empty buffer ({sample!r})"
+    deadline = time.monotonic() + 2.0
+    sample: np.ndarray | None = None
+    while time.monotonic() < deadline:
+        sample = mini.media.get_audio_sample()
+        if sample is not None and sample.size > 0:
+            break
+    assert sample is not None, "get_audio_sample kept returning None for 2s — mic not primed?"
+    assert sample.size > 0, f"get_audio_sample yielded empty array ({sample!r})"
+    assert sample.dtype == np.float32, f"expected float32 per SDK contract, got {sample.dtype}"
 
 
 @pytest.mark.hardware
-def test_push_audio_sample_accepts_silent_frame() -> None:
-    """push_audio_sample accepts a well-formed silent PCM frame.
+def test_push_audio_sample_accepts_silent_frame(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``push_audio_sample`` accepts a well-formed silent float32 frame.
 
     The SDK's MediaManager.push_audio_sample takes ``npt.NDArray[np.float32]``
-    per the installed ``reachy_mini.media.media_manager`` source. A PCM16
-    bytes payload would fail here — the ReachyMicSource/ReachySpeakerSink
-    impls in Tasks 1.2/1.3 handle format conversion at the boundary so
-    the MicSource/SpeakerSink ABC's PCM16-bytes contract (set by the
-    OpenAI Realtime API downstream) stays intact.
+    per the installed ``reachy_mini.media.media_manager`` source. The
+    ``MicSource`` / ``SpeakerSink`` ABC contract stays PCM16-bytes (matches
+    OpenAI Realtime API downstream); Tasks 1.2 / 1.3 handle
+    float32↔PCM16 conversion at the Reachy adapter boundary.
+
+    We assert not only that the call doesn't raise but also that it
+    emits no warning — the SDK silently logs a warning and returns on
+    wrong-shape input (media_manager.py:343-347), so a no-op silently
+    passing "must not raise" would be the accomplishment-simulator
+    anti-pattern ``testing-standards.md`` warns against.
     """
     mini = ReachyMini()
-    # 40ms @ 24 kHz mono float32 = 960 samples. If sample rate or dtype
-    # is different on real hardware, this test fails with a clear error
-    # and Task 1.5's refinement pass will tighten the shape.
+    # 40ms @ 24 kHz mono float32 = 960 samples.
     silent = np.zeros(960, dtype=np.float32)
-    mini.media.push_audio_sample(silent)  # must not raise
-
-
-@pytest.mark.hardware
-def test_get_audio_sample_signature_is_parameterless() -> None:
-    """Signature is () → buffer; we rely on calling without arguments."""
-    sig = inspect.signature(ReachyMini().media.get_audio_sample)
-    assert len(sig.parameters) == 0, (
-        f"get_audio_sample unexpectedly accepts {list(sig.parameters)}; "
-        "ReachyMicSource calls it with no arguments"
+    with caplog.at_level(logging.WARNING, logger="reachy_mini.media.media_manager"):
+        mini.media.push_audio_sample(silent)
+    assert not caplog.records, (
+        f"push_audio_sample logged warnings (data dropped silently): "
+        f"{[r.getMessage() for r in caplog.records]}"
     )
