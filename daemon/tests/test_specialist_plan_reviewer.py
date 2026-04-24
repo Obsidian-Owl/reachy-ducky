@@ -679,3 +679,55 @@ async def test_capture_diff_falls_back_when_main_ref_absent(tmp_path: Path) -> N
         f"fallback_idx={fallback_idx}, hunk_idx={hunk_idx}"
     )
     assert "working-tree" in diff_lines[fallback_idx].lower(), diff_lines[fallback_idx]
+
+
+@pytest.mark.asyncio
+async def test_single_oversized_plan_still_lands_despite_total_cap(
+    tmp_path: Path,
+) -> None:
+    """A single plan larger than ``max_total_plan_chars`` MUST land anyway —
+    the ``included > 0`` guard in ``_assemble_plans_block`` ensures we
+    never return zero plans when at least one exists.
+
+    Regression guard: if a future refactor changes ``included > 0``
+    to ``included > 1`` or drops the guard, this test fails clearly.
+    The per-file cap truncates the body; the total-budget check still
+    lets the single (truncated) plan through.
+    """
+    _init_repo(tmp_path)
+    plans_dir = tmp_path / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+
+    # Plan body is larger than BOTH caps — 250k chars, per-file cap is
+    # 60k, total-budget cap is 50k. Without the included > 0 guard,
+    # the plan would be dropped as over-budget.
+    huge = "a" * 250_000
+    (plans_dir / "huge.md").write_text(huge)
+    _commit(tmp_path, "add huge plan")
+
+    brain = MockBrain()
+    reviewer = PlanReviewer(
+        brain=brain,
+        repo=tmp_path,
+        max_plan_chars=60_000,
+        max_total_plan_chars=50_000,
+    )
+    await reviewer.review()
+
+    prompt = brain.calls[-1].user_utterance
+
+    # The plan MUST land, truncated to 60k via per-file cap.
+    assert "huge.md" in prompt, (
+        "Plan file name missing from prompt — 'at least one plan lands' invariant broken"
+    )
+    # Plan body is present up to the per-file cap. Assert 60k 'a's in a row;
+    # the truncation marker follows.
+    assert "a" * 60_000 in prompt, "Per-file truncation didn't yield 60k body"
+    assert "[... truncated:" in prompt, "Per-file truncation marker missing"
+    # Total-budget omission marker MUST NOT appear — we did NOT omit a plan.
+    assert "plans omitted" not in prompt, (
+        "Total-budget marker incorrectly fired on single-plan case"
+    )
+    assert "plan omitted" not in prompt, (
+        "Total-budget marker (singular) incorrectly fired on single-plan case"
+    )
