@@ -75,17 +75,21 @@ def test_load_parses_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     toml_path = tmp_path / "config.toml"
     project_dir = tmp_path / "work" / "reachy-ducky"
     project_dir.mkdir(parents=True)
+    # ``.as_posix()`` keeps the interpolated paths free of backslashes so
+    # ``tomllib`` doesn't see Windows ``C:\Users\...`` as escape sequences
+    # (e.g. ``\U`` is a unicode-escape header). Forward slashes are safe
+    # cross-platform — Linux/macOS already use them.
     toml_path.write_text(
         f"""
 [daemon]
 host = "0.0.0.0"
 port = 9000
-memory_root = "{tmp_path / "mem"}"
+memory_root = "{(tmp_path / "mem").as_posix()}"
 auth_token = "hunter2"
 
 [[projects]]
 slug = "reachy-ducky"
-path = "{project_dir}"
+path = "{project_dir.as_posix()}"
 github_repo = "Obsidian-Owl/reachy-ducky"
 primary = true
         """
@@ -142,12 +146,12 @@ def test_env_overrides_toml_on_every_field(tmp_path: Path, monkeypatch: pytest.M
 [daemon]
 host = "10.0.0.1"
 port = 1111
-memory_root = "{tmp_path / "toml-mem"}"
+memory_root = "{(tmp_path / "toml-mem").as_posix()}"
 auth_token = "toml-token"
 
 [[projects]]
 slug = "toml-proj"
-path = "{proj}"
+path = "{proj.as_posix()}"
 primary = true
         """
     )
@@ -192,7 +196,9 @@ memory_root = "~/custom-mem"
     )
     cfg = AppConfig.load(path=toml_path)
     assert not str(cfg.memory_root).startswith("~")
-    assert str(cfg.memory_root).endswith("/custom-mem")
+    # ``.name`` is platform-agnostic; using ``str(...).endswith("/custom-mem")``
+    # would fail on Windows where the separator is a backslash.
+    assert cfg.memory_root.name == "custom-mem"
 
 
 def test_project_path_expands_tilde_and_resolves(
@@ -207,7 +213,7 @@ def test_project_path_expands_tilde_and_resolves(
         f"""
 [[projects]]
 slug = "demo"
-path = "{proj}"
+path = "{proj.as_posix()}"
         """
     )
     cfg = AppConfig.load(path=toml_path)
@@ -228,7 +234,7 @@ def test_env_project_fallback_yields_to_toml_projects(
         f"""
 [[projects]]
 slug = "from-toml"
-path = "{toml_proj}"
+path = "{toml_proj.as_posix()}"
         """
     )
     monkeypatch.setenv("REACHY_DUCKY_PROJECT_ROOT", str(env_proj))

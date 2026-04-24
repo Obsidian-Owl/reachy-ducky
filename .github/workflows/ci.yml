@@ -130,11 +130,23 @@ jobs:
       - name: Bandit (security)
         run: uv run bandit -ll -r daemon/src app/src menubar/src protocol/src
 
-      - name: Pytest (unit tier) with coverage
+      - name: Pytest (unit tier) with coverage (Linux + macOS)
+        if: runner.os != 'Windows'
         # Coverage floor + report formats: `term-missing` for the job log;
         # `xml` for future upload to Codecov / artifact inspection. The
         # `fail_under` threshold lives in pyproject.toml's
         # [tool.coverage.report] so the same floor applies locally.
         run: uv run pytest -q --cov --cov-report=term-missing --cov-report=xml
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+
+      - name: Pytest (unit tier) with coverage (Windows — informational only)
+        if: runner.os == 'Windows'
+        # Windows is the informational tier of the CI matrix per Phase 3 of
+        # the canonical-dep-migration plan: it catches install-story breaks
+        # but coverage gating lives on Linux + macOS where the menubar tests
+        # (skipped on Windows because rumps is macOS-only) actually run.
+        # ``--cov-fail-under=0`` overrides the pyproject.toml threshold.
+        run: uv run pytest -q --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=0
         env:
           PYTHONDONTWRITEBYTECODE: "1"
