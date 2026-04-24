@@ -119,13 +119,25 @@ class ReachyMicSource(MicSource):
         self._mini = reachy_mini
 
     async def frames(self) -> AsyncIterator[AudioFrame]:
-        """Yield ``(24000, int16 mono)`` tuples until the SDK returns ``None``."""
+        """Yield (24 kHz, int16 mono) tuples in a long-running loop.
+
+        The SDK's ``get_audio_sample()`` returns ``None`` transiently while
+        GStreamer buffers warm up (documented in
+        :mod:`test_sdk_audio_contract`). We poll with a brief sleep on
+        ``None`` rather than treating it as end-of-stream — the mic is
+        always recording; only task cancellation should terminate this
+        generator.
+        """
         loop = asyncio.get_running_loop()
         get_sample = self._mini.media.get_audio_sample  # type: ignore[attr-defined]
         while True:
             sample = await loop.run_in_executor(None, get_sample)
             if sample is None:
-                return
+                # Buffer empty — wait briefly so we don't busy-loop the
+                # executor. 10 ms is shorter than a typical audio frame
+                # (~40 ms @ 24 kHz).
+                await asyncio.sleep(0.01)
+                continue
             # Collapse stereo (N, 2) → mono. Pick channel 0 per the
             # conversation-app reference (openai_realtime.py:760).
             mono = sample[:, 0] if sample.ndim == 2 else sample

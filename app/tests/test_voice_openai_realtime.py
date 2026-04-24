@@ -416,6 +416,55 @@ async def test_get_user_text_pumps_mic_frames_as_base64_append_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mic_send_path_resamples_non_24khz_frames() -> None:
+    """OpenAI Realtime expects 24 kHz PCM16; AudioFrame rate != 24 kHz
+    must be resampled before transmission.
+
+    Protects against a future MicSource (sim, different hardware)
+    yielding at a non-24 kHz rate — without this, bytes would be
+    interpreted at OpenAI's default 24 kHz and produce chipmunk /
+    slow audio. Mirrors the reference's per-frame resample
+    (openai_realtime.py:763-764 in
+    pollen-robotics/reachy_mini_conversation_app).
+    """
+    # Build a 16 kHz AudioFrame — two-thirds the OpenAI rate, so
+    # resample should scale the sample count by 24/16 = 1.5x before send.
+    source_rate = 16000
+    source_samples = np.full(480, 8000, dtype=np.int16)  # known value
+    mic = MockMicSource(frames=[(source_rate, source_samples)])
+    speaker = MockSpeakerSink()
+    connection = _FakeConnection(events=[_make_transcription_completed("hi")])
+
+    turn = OpenAIRealtimeVoiceTurn(connection, mic=mic, speaker=speaker)  # type: ignore[arg-type]
+
+    result = await asyncio.wait_for(turn.get_user_text(), timeout=1.0)
+
+    assert result == "hi"
+    # Frame was appended exactly once.
+    assert connection.input_audio_buffer.append.await_count == 1
+
+    # Extract the base64 payload and decode back to int16.
+    append_call = connection.input_audio_buffer.append.await_args
+    assert append_call is not None
+    b64_audio = append_call.kwargs["audio"]
+    pcm_bytes = base64.b64decode(b64_audio)
+    sent_int16 = np.frombuffer(pcm_bytes, dtype=np.int16)
+
+    # Resampled from 480 @ 16 kHz → 720 @ 24 kHz (1.5x). This
+    # specifically pins that the rate was honored — 480 bytes would
+    # indicate the rate was ignored (the bug) and 720 means the
+    # resample happened before send.
+    assert sent_int16.shape == (720,), (
+        f"expected 720 samples (480 × 24/16), got {sent_int16.shape} — "
+        "rate likely not honored before send"
+    )
+    # Constant-in → approximately-constant-out; FFT-resample introduces
+    # edge ringing, so check the steady-state interior with a tight
+    # tolerance.
+    np.testing.assert_allclose(sent_int16[100:-100], 8000, atol=20)
+
+
+@pytest.mark.asyncio
 async def test_get_user_text_cancels_mic_pump_on_transcription() -> None:
     """When transcription arrives, the mic pump task must be cancelled.
 

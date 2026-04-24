@@ -101,9 +101,11 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
+import numpy.typing as npt
+import scipy.signal
 from openai.types.realtime import (
     RealtimeErrorEvent,
     ResponseAudioDeltaEvent,
@@ -192,11 +194,26 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
 
         async def _pump_mic() -> None:
             async for frame in self._mic.frames():
-                _sample_rate, int16 = frame
+                sample_rate, int16 = frame
+                # Resample to OpenAI's 24 kHz if the MicSource yields a
+                # different rate. Mirrors the reference's per-frame
+                # resample pattern (openai_realtime.py:763-764 in
+                # pollen-robotics/reachy_mini_conversation_app).
+                # ``ReachyMicSource`` always yields 24 kHz, but this
+                # guards future sources (sim, other hardware) against
+                # chipmunk/slow playback if they yield at a different
+                # rate.
+                if sample_rate != _LLM_AUDIO_RATE:
+                    resampled = cast(
+                        npt.NDArray[np.float32],
+                        scipy.signal.resample(
+                            int16.astype(np.float32),
+                            int(len(int16) * _LLM_AUDIO_RATE / sample_rate),
+                        ),
+                    )
+                    int16 = np.clip(resampled, -32768, 32767).astype(np.int16)
                 # OpenAI Realtime expects raw PCM16 little-endian bytes
-                # in base64. The mic adapter has already resampled to
-                # ``_LLM_AUDIO_RATE`` and cast to int16 — the network
-                # boundary just serializes.
+                # in base64. The network boundary just serializes.
                 pcm_bytes = int16.tobytes()
                 b64 = base64.b64encode(pcm_bytes).decode("ascii")
                 await self._connection.input_audio_buffer.append(audio=b64)

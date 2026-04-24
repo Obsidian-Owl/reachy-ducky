@@ -10,6 +10,9 @@ hardware.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+
 import numpy as np
 import pytest
 from reachy_ducky_app.voice.audio_io import (
@@ -35,9 +38,12 @@ class _FakeMedia:
     """Stand-in for ``reachy_mini.media.MediaManager`` covering the audio surface.
 
     Mic side: pops scripted stereo (N, 2) float32 samples until exhausted,
-    then returns ``None`` to signal end-of-stream. Speaker side: appends
-    every ``push_audio_sample`` payload into ``pushed`` for assertions.
-    Also exposes the samplerate getters so the FakeMedia stays
+    then raises :class:`asyncio.CancelledError` to simulate task-level
+    cancellation (the only correct way to terminate the adapter's
+    now-infinite polling loop — ``None`` is transient per
+    :mod:`test_sdk_audio_contract`). Speaker side: appends every
+    ``push_audio_sample`` payload into ``pushed`` for assertions. Also
+    exposes the samplerate getters so the FakeMedia stays
     forward-compatible if the adapter ever consults them (today it
     hardcodes 16 kHz to match the real SDK's ``AudioBase.SAMPLE_RATE``).
     """
@@ -48,7 +54,7 @@ class _FakeMedia:
 
     def get_audio_sample(self) -> np.ndarray | None:
         if not self._scripted:
-            return None
+            raise asyncio.CancelledError
         return self._scripted.pop(0)
 
     def push_audio_sample(self, data: np.ndarray) -> None:
@@ -173,8 +179,9 @@ async def test_reachy_mic_source_collapses_resamples_and_casts_to_int16() -> Non
     src = ReachyMicSource(_FakeMini(media))
 
     collected: list[AudioFrame] = []
-    async for frame in src.frames():
-        collected.append(frame)
+    with contextlib.suppress(asyncio.CancelledError):
+        async for frame in src.frames():
+            collected.append(frame)
 
     # Exactly one frame yielded then end-of-stream.
     assert len(collected) == 1
@@ -189,20 +196,47 @@ async def test_reachy_mic_source_collapses_resamples_and_casts_to_int16() -> Non
     np.testing.assert_allclose(int16[100:-100], 16383, atol=20)
 
 
-async def test_reachy_mic_source_terminates_on_none_sentinel() -> None:
-    """Adapter stops when the SDK returns ``None`` (no more data available)."""
-    media = _FakeMedia(
-        scripted=[
-            np.full((480, 2), 0.1, dtype=np.float32),
-            np.full((480, 2), 0.2, dtype=np.float32),
-        ]
-    )
-    src = ReachyMicSource(_FakeMini(media))
+async def test_reachy_mic_source_keeps_polling_on_transient_none() -> None:
+    """SDK returns None transiently while GStreamer warms up.
 
-    frames = [frame async for frame in src.frames()]
+    The adapter must keep polling — mic is always recording, only task
+    cancellation terminates. Pinning this so a future refactor that
+    accidentally converts None → end-of-stream gets caught before
+    reaching hardware (where startup would see 0 frames).
+    """
+    sequence: list[np.ndarray | None] = [
+        None,
+        None,
+        np.full((480, 2), 0.1, dtype=np.float32),
+        None,
+        np.full((480, 2), 0.2, dtype=np.float32),
+    ]
 
-    assert len(frames) == 2
-    # Second call after exhaustion would have returned None and ended the loop.
+    class _FakeMediaTransient:
+        _i = 0
+
+        def get_audio_sample(self) -> np.ndarray | None:
+            if _FakeMediaTransient._i >= len(sequence):
+                raise asyncio.CancelledError  # simulate task cancel
+            frame = sequence[_FakeMediaTransient._i]
+            _FakeMediaTransient._i += 1
+            return frame
+
+    class _FakeMiniTransient:
+        media = _FakeMediaTransient()
+
+    src = ReachyMicSource(_FakeMiniTransient())
+
+    collected: list[AudioFrame] = []
+    with contextlib.suppress(asyncio.CancelledError):
+        async for frame in src.frames():
+            collected.append(frame)
+
+    # Two non-None frames yielded despite Nones interleaved.
+    assert len(collected) == 2, f"expected 2 frames, got {len(collected)}"
+    # Both at the LLM rate.
+    for sr, _ in collected:
+        assert sr == _LLM_RATE
 
 
 async def test_reachy_mic_source_handles_mono_input_without_collapsing() -> None:
@@ -216,7 +250,10 @@ async def test_reachy_mic_source_handles_mono_input_without_collapsing() -> None
     media = _FakeMedia(scripted=[mono_frame])
     src = ReachyMicSource(_FakeMini(media))
 
-    collected = [frame async for frame in src.frames()]
+    collected: list[AudioFrame] = []
+    with contextlib.suppress(asyncio.CancelledError):
+        async for frame in src.frames():
+            collected.append(frame)
 
     assert len(collected) == 1
     sample_rate, int16 = collected[0]
