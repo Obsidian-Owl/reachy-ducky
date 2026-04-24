@@ -8,11 +8,17 @@ Exposes two read-only tools over ``create_sdk_mcp_server``:
 * ``read_plan`` — read a single plan/spec file by its project-relative path,
   with two non-negotiable security properties:
 
-    1. the resolved target path must stay inside the project root
-       (``..`` traversal, absolute paths, and symlink escapes are denied);
+    1. the resolved target path must stay inside the project root (``..``
+       traversal and absolute paths are rejected by ``_read_plan``'s own
+       ``is_relative_to`` check; symlink escapes are denied in
+       :func:`_discover`, which silently drops any hit whose ``.resolve()``
+       escapes ``project_root`` at discovery time);
     2. the target path must be one of the files that :func:`_discover` would
        advertise (``read_plan`` is not a general-purpose file reader — daemon
-       source and secrets are denied even if they exist).
+       source and secrets are denied even if they exist). Because
+       ``_discover`` has already filtered symlink escapes, this membership
+       check inherits the property: ``_read_plan`` can only return content
+       for paths ``_discover`` already cleared.
 
 The tool surface is intentionally tiny: Claude uses its built-in ``Read`` /
 ``Glob`` / ``Grep`` tools (gated by the PreToolUse security hook) for
