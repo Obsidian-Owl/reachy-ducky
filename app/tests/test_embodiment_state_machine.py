@@ -8,6 +8,7 @@ from reachy_ducky_app.embodiment import (
     MockMotionDriver,
     MotionDriver,
 )
+from reachy_ducky_app.mute import MuteGate
 from reachy_ducky_protocol.messages import State
 
 
@@ -159,3 +160,116 @@ def test_every_state_has_entry_handling(target: State) -> None:
     sm = EmbodimentStateMachine(driver)
     sm.transition(target)
     assert sm.state == target
+
+
+def test_transition_to_muted_sets_mute_gate() -> None:
+    """Transitioning the state machine into MUTED toggles the MuteGate.
+
+    Earliest-boundary mute coordination: downstream consumers (mic pump,
+    VU meter, head wobble) all see the gate state change without each
+    needing its own transition subscription.
+    """
+    gate = MuteGate()
+    driver = MockMotionDriver()
+    sm = EmbodimentStateMachine(driver, mute_gate=gate)
+
+    assert gate.muted is False
+    sm.transition(State.MUTED)
+    assert gate.muted is True
+
+
+def test_transition_out_of_muted_clears_mute_gate() -> None:
+    """Leaving MUTED clears the gate symmetrically."""
+    gate = MuteGate()
+    driver = MockMotionDriver()
+    sm = EmbodimentStateMachine(driver, mute_gate=gate)
+
+    sm.transition(State.MUTED)
+    assert gate.muted is True
+    sm.transition(State.IDLE)
+    assert gate.muted is False
+
+
+def test_state_machine_without_mute_gate_still_works() -> None:
+    """``mute_gate=None`` is back-compat: no gate calls; transitions still fire."""
+    driver = MockMotionDriver()
+    sm = EmbodimentStateMachine(driver)  # No mute_gate kwarg.
+    sm.transition(State.MUTED)
+    assert sm.state == State.MUTED
+    # Driver still got the visible sleep posture (existing behaviour).
+    assert driver.went_to_sleep is True
+
+
+def test_failed_motion_leaves_state_and_mute_gate_unchanged() -> None:
+    """If the driver raises, _state AND _mute_gate stay at prior values.
+
+    Atomic-on-success contract: a half-failed transition (state moved,
+    gate didn't, or vice versa) is the exact bug Codex/Augment surfaced
+    on PR #71. Pinning here so a future refactor can't reintroduce it.
+    """
+
+    class _RaisingDriver(MotionDriver):
+        def play_move(self, name: str) -> None:
+            raise RuntimeError("simulated driver failure")
+
+        def go_to_sleep(self) -> None:
+            raise RuntimeError("simulated driver failure")
+
+        def wake_up(self) -> None:
+            raise RuntimeError("simulated driver failure")
+
+        def look_at_image(self, u: float, v: float, duration: float = 0.3) -> None:
+            raise RuntimeError("simulated driver failure")
+
+    gate = MuteGate()
+    driver = _RaisingDriver()
+    sm = EmbodimentStateMachine(driver, mute_gate=gate)
+
+    # MUTED entry that fails: state and gate must both stay at IDLE / unmuted.
+    with pytest.raises(RuntimeError, match="simulated driver failure"):
+        sm.transition(State.MUTED)
+    assert sm.state == State.IDLE, "state advanced despite driver failure"
+    assert gate.muted is False, "gate flipped despite driver failure"
+
+
+def test_failed_motion_from_muted_leaves_state_and_mute_gate_unchanged() -> None:
+    """Symmetric inverse: failed exit from MUTED keeps state == MUTED AND
+    gate.muted == True.
+
+    Codex specifically called out this direction (mic stays zeroed even
+    though the app reports muted — but state ALSO stays muted, so no
+    desync; the failed transition is a no-op for both).
+    """
+
+    class _ConditionalDriver(MotionDriver):
+        """Succeeds on go_to_sleep (entering MUTED), then raises on wake_up."""
+
+        def __init__(self) -> None:
+            self.went_to_sleep = False
+
+        def play_move(self, name: str) -> None:
+            pass  # not exercised in this test
+
+        def go_to_sleep(self) -> None:
+            self.went_to_sleep = True
+
+        def wake_up(self) -> None:
+            raise RuntimeError("simulated wake_up failure")
+
+        def look_at_image(self, u: float, v: float, duration: float = 0.3) -> None:
+            pass  # not exercised in this test
+
+    gate = MuteGate()
+    driver = _ConditionalDriver()
+    sm = EmbodimentStateMachine(driver, mute_gate=gate)
+
+    # Enter MUTED — succeeds.
+    sm.transition(State.MUTED)
+    assert sm.state == State.MUTED
+    assert gate.muted is True
+
+    # Exit MUTED — wake_up fails. State + gate must stay at MUTED / muted.
+    with pytest.raises(RuntimeError, match="simulated wake_up failure"):
+        sm.transition(State.IDLE)
+    assert sm.state == State.MUTED, "state advanced despite wake_up failure"
+    assert gate.muted is True, "gate cleared despite wake_up failure"

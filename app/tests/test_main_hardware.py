@@ -1,0 +1,68 @@
+"""Hardware smoke for #20 — mute coordination end-to-end on real hardware.
+
+Gated on ``@pytest.mark.hardware``. Runs when the user is on LAN and
+the Reachy Mini is reachable at ``reachy-mini.local``. Deferred from
+the offline workstream (which landed the integration smoke in
+``test_mute_integration.py``); runs alongside Task 1.5's audio smoke
+when the user is back on LAN.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+
+import numpy as np
+import pytest
+from reachy_ducky_app.embodiment import EmbodimentStateMachine, MockMotionDriver
+from reachy_ducky_app.mute import MuteGate
+from reachy_ducky_app.voice.audio_io import AudioFrame, ReachyMicSource
+from reachy_ducky_protocol.messages import State
+
+reachy_mini = pytest.importorskip(
+    "reachy_mini",
+    reason="hardware tests require the reachy-mini SDK installed",
+)
+
+
+@pytest.mark.hardware
+async def test_muted_transition_zeros_live_mic() -> None:
+    """On real hardware, MUTED transition yields zeroed int16 samples.
+
+    Same contract as ``test_state_machine_transition_to_muted_zeros_mic_frames``
+    in the offline integration smoke, but against a LIVE ReachyMini
+    via the real SDK.
+    """
+    mini = reachy_mini.ReachyMini()
+    gate = MuteGate()
+    driver = MockMotionDriver()  # Don't actually care about motion side-effects here.
+    sm = EmbodimentStateMachine(driver, mute_gate=gate)
+    src = ReachyMicSource(mini, mute_gate=gate)
+
+    # Pull a few frames pre-mute; just confirm the pipeline is alive.
+    frames_before: list[AudioFrame] = []
+
+    async def drain_pre() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            async for frame in src.frames():
+                frames_before.append(frame)
+                if len(frames_before) >= 2:
+                    return
+
+    await asyncio.wait_for(drain_pre(), timeout=5.0)
+
+    # Transition to MUTED; subsequent frames must be all zeros.
+    sm.transition(State.MUTED)
+    frames_after: list[AudioFrame] = []
+
+    async def drain_post() -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            async for frame in src.frames():
+                frames_after.append(frame)
+                if len(frames_after) >= 2:
+                    return
+
+    await asyncio.wait_for(drain_post(), timeout=5.0)
+
+    for _sr, samples in frames_after:
+        assert np.all(samples == 0), "live-hardware muted frame had signal"

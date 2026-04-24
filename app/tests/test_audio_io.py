@@ -15,6 +15,7 @@ import contextlib
 
 import numpy as np
 import pytest
+from reachy_ducky_app.mute import MuteGate
 from reachy_ducky_app.voice.audio_io import (
     AudioFrame,
     MicSource,
@@ -408,3 +409,120 @@ def test_load_default_factories_require_keyword_for_reachy_mini() -> None:
         load_default_mic_source(_BareFakeMini())  # type: ignore[misc]
     with pytest.raises(TypeError):
         load_default_speaker_sink(_BareFakeMini())  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# ReachyMicSource — MuteGate integration (Task A.2)
+# ---------------------------------------------------------------------------
+
+
+async def test_reachy_mic_source_applies_mute_gate_zeros_frames() -> None:
+    """When the MuteGate is muted, ReachyMicSource yields zeroed int16 frames.
+
+    Zero-at-source: all downstream consumers (OpenAI, head wobble, VU)
+    see silence consistently. Gate applied post-resample / pre-yield so
+    the int16 ndarray shape is fixed and the zeroing is a simple
+    np.zeros_like.
+    """
+    scripted = [
+        np.full((480, 2), 0.5, dtype=np.float32),
+        np.full((480, 2), -0.5, dtype=np.float32),
+    ]
+
+    class _FakeMediaMuted:
+        _i = 0
+
+        def get_audio_sample(self) -> np.ndarray | None:
+            if _FakeMediaMuted._i >= len(scripted):
+                raise asyncio.CancelledError
+            f = scripted[_FakeMediaMuted._i]
+            _FakeMediaMuted._i += 1
+            return f
+
+    class _FakeMiniMuted:
+        media = _FakeMediaMuted()
+
+    gate = MuteGate()
+    gate.set_muted(True)
+    src = ReachyMicSource(_FakeMiniMuted(), mute_gate=gate)
+
+    collected: list[AudioFrame] = []
+    with contextlib.suppress(asyncio.CancelledError):
+        async for frame in src.frames():
+            collected.append(frame)
+
+    assert len(collected) == 2
+    for sr, samples in collected:
+        assert sr == _LLM_RATE
+        assert np.all(samples == 0), f"muted frame had non-zero values: {samples!r}"
+
+
+async def test_reachy_mic_source_passes_through_when_unmuted() -> None:
+    """When the MuteGate is NOT muted, frames pass through unchanged."""
+    scripted = [np.full((480, 2), 0.5, dtype=np.float32)]
+
+    class _FakeMediaUnmuted:
+        _i = 0
+
+        def get_audio_sample(self) -> np.ndarray | None:
+            if _FakeMediaUnmuted._i >= len(scripted):
+                raise asyncio.CancelledError
+            f = scripted[_FakeMediaUnmuted._i]
+            _FakeMediaUnmuted._i += 1
+            return f
+
+    class _FakeMiniUnmuted:
+        media = _FakeMediaUnmuted()
+
+    gate = MuteGate()  # Defaults to unmuted.
+    src = ReachyMicSource(_FakeMiniUnmuted(), mute_gate=gate)
+
+    with contextlib.suppress(asyncio.CancelledError):
+        async for sr, samples in src.frames():
+            assert sr == _LLM_RATE
+            # 0.5 float32 → ~16383 int16 post-conversion — signal present.
+            assert np.any(samples != 0)
+            break
+
+
+async def test_reachy_mic_source_without_gate_passes_through() -> None:
+    """No mute_gate kwarg → frames pass through unchanged (back-compat)."""
+    scripted = [np.full((480, 2), 0.5, dtype=np.float32)]
+
+    class _FakeMediaNoGate:
+        _i = 0
+
+        def get_audio_sample(self) -> np.ndarray | None:
+            if _FakeMediaNoGate._i >= len(scripted):
+                raise asyncio.CancelledError
+            f = scripted[_FakeMediaNoGate._i]
+            _FakeMediaNoGate._i += 1
+            return f
+
+    class _FakeMiniNoGate:
+        media = _FakeMediaNoGate()
+
+    src = ReachyMicSource(_FakeMiniNoGate())  # No mute_gate kwarg.
+    with contextlib.suppress(asyncio.CancelledError):
+        async for _sr, samples in src.frames():
+            assert np.any(samples != 0)
+            break
+
+
+def test_load_default_mic_source_threads_mute_gate() -> None:
+    """Factory accepts ``mute_gate`` kwarg and passes it into ReachyMicSource."""
+    gate = MuteGate()
+
+    class _BareFakeMini:
+        pass
+
+    src = load_default_mic_source(reachy_mini=_BareFakeMini(), mute_gate=gate)
+    assert isinstance(src, ReachyMicSource)
+    # Verify the gate was threaded, not silently dropped.
+    assert src._mute_gate is gate  # noqa: SLF001 — test injection check.
+
+
+def test_load_default_mic_source_mute_gate_is_keyword_only() -> None:
+    """``mute_gate`` must be keyword-only — forward-compat with factory API growth."""
+    with pytest.raises(TypeError):
+        load_default_mic_source(object(), MuteGate())  # type: ignore[misc]

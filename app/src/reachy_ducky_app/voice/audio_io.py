@@ -27,6 +27,8 @@ import numpy as np
 import numpy.typing as npt
 import scipy.signal
 
+from ..mute import MuteGate
+
 # ``AudioFrame = (sample_rate, int16 mono ndarray)``. Matches the raw-tuple
 # shape used by pollen-robotics/reachy_mini_conversation_app's
 # AsyncStreamHandler pattern (console.py:569-630) so our adapters are
@@ -113,10 +115,23 @@ class ReachyMicSource(MicSource):
     whose ``.media`` exposes ``get_audio_sample()``; the factory
     :func:`load_default_mic_source` selects this impl over
     :class:`MockMicSource` when a non-None ``reachy_mini`` is passed.
+
+    When a :class:`MuteGate` is passed via the keyword-only ``mute_gate``
+    kwarg, the adapter applies it post-resample / pre-yield so the int16
+    samples are zeroed when the gate is muted. Zero-at-source:
+    downstream consumers (OpenAI Realtime session, future head-wobble
+    driver, VU meter) all observe silence consistently when the gate is
+    muted, without each needing its own mute subscription.
     """
 
-    def __init__(self, reachy_mini: object) -> None:
+    def __init__(
+        self,
+        reachy_mini: object,
+        *,
+        mute_gate: MuteGate | None = None,
+    ) -> None:
         self._mini = reachy_mini
+        self._mute_gate = mute_gate
 
     async def frames(self) -> AsyncIterator[AudioFrame]:
         """Yield (24 kHz, int16 mono) tuples in a long-running loop.
@@ -155,6 +170,8 @@ class ReachyMicSource(MicSource):
             # Float32 [-1, 1] → int16 via * 32767 (matches
             # fastrtc.audio_to_int16 which the reference uses).
             int16 = (np.clip(resampled, -1.0, 1.0) * 32767).astype(np.int16)
+            if self._mute_gate is not None:
+                int16 = self._mute_gate.process(int16)
             yield (_LLM_AUDIO_RATE, int16)
 
 
@@ -198,7 +215,11 @@ class ReachySpeakerSink(SpeakerSink):
         await loop.run_in_executor(None, push, float32)
 
 
-def load_default_mic_source(*, reachy_mini: object | None = None) -> MicSource:
+def load_default_mic_source(
+    *,
+    reachy_mini: object | None = None,
+    mute_gate: MuteGate | None = None,
+) -> MicSource:
     """Return :class:`ReachyMicSource` when ``reachy_mini`` is given, else mock.
 
     The on-robot Pollen daemon hands :meth:`ReachyDuckyApp.run` a live
@@ -206,12 +227,16 @@ def load_default_mic_source(*, reachy_mini: object | None = None) -> MicSource:
     through this factory so production is hardware by default. Dev
     machines and unit tests pass ``None`` (the default) and get the
     silent :class:`MockMicSource`. ``reachy_mini`` is keyword-only so
-    future kwargs (e.g. M2's ``mute_gate``) can be added without
-    positional churn.
+    future kwargs can be added without positional churn.
+
+    ``mute_gate`` is also keyword-only. When provided alongside a
+    non-None ``reachy_mini``, it's threaded into the returned
+    :class:`ReachyMicSource`. :class:`MockMicSource` ignores the gate
+    (tests script frames directly — no gating needed).
     """
     if reachy_mini is None:
         return MockMicSource()
-    return ReachyMicSource(reachy_mini)
+    return ReachyMicSource(reachy_mini, mute_gate=mute_gate)
 
 
 def load_default_speaker_sink(*, reachy_mini: object | None = None) -> SpeakerSink:
