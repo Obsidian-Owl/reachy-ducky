@@ -27,6 +27,7 @@ from .conversation import run_one_turn
 from .daemon_client import DaemonClient
 from .embodiment.motion_driver import ReachyMotionDriver
 from .embodiment.state_machine import EmbodimentStateMachine
+from .mute import MuteGate
 from .voice.audio_io import load_default_mic_source, load_default_speaker_sink
 from .voice.openai_realtime import OpenAIRealtimeVoice
 from .wake import load_default_wake_detector
@@ -76,9 +77,14 @@ class ReachyDuckyApp:
         ``run_one_turn``.
         """
         driver = ReachyMotionDriver(reachy_mini)
-        sm = EmbodimentStateMachine(driver=driver)
+        # Single shared gate: state machine toggles it on MUTED transitions
+        # (Task A.1); the mic pump reads it on every frame (Task A.2). Both
+        # consumers MUST see the same instance or the zero-at-source
+        # invariant breaks.
+        mute_gate = MuteGate()
+        sm = EmbodimentStateMachine(driver=driver, mute_gate=mute_gate)
         voice = OpenAIRealtimeVoice(
-            mic=load_default_mic_source(reachy_mini=reachy_mini),
+            mic=load_default_mic_source(reachy_mini=reachy_mini, mute_gate=mute_gate),
             speaker=load_default_speaker_sink(reachy_mini=reachy_mini),
         )
         daemon = DaemonClient.from_env()

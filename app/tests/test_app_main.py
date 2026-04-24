@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from reachy_ducky_app.main import ReachyDuckyApp, main
+from reachy_ducky_app.mute import MuteGate
 from reachy_ducky_app.voice.audio_io import MicSource, MockMicSource, MockSpeakerSink, SpeakerSink
 from reachy_ducky_app.wake import MockWakeDetector
 
@@ -243,21 +244,35 @@ async def test_run_async_constructs_voice_with_default_mic_and_speaker(
     :func:`load_default_mic_source` and :func:`load_default_speaker_sink`
     rather than hard-coding Mock impls directly. When the hardware-backed
     factory bodies land, ``main.py`` should require zero changes.
+
+    Also pins Task A.2: the mic factory receives the SAME ``MuteGate``
+    instance that the state machine received, so a MUTED transition
+    synchronously affects the mic pump. The speaker factory deliberately
+    does NOT receive a gate — speaker output is LLM-generated and
+    shouldn't be silenced when the user mutes.
     """
     monkeypatch.setenv("OPENAI_API_KEY", "test")
 
-    mic_factory_calls = 0
-    speaker_factory_calls = 0
+    mic_factory_kwargs: list[dict[str, object]] = []
+    speaker_factory_kwargs: list[dict[str, object]] = []
 
-    def _spy_mic_factory(reachy_mini: object | None = None) -> MicSource:
-        nonlocal mic_factory_calls
-        mic_factory_calls += 1
+    def _spy_mic_factory(
+        *,
+        reachy_mini: object | None = None,
+        mute_gate: MuteGate | None = None,
+    ) -> MicSource:
+        mic_factory_kwargs.append({"reachy_mini": reachy_mini, "mute_gate": mute_gate})
         return MockMicSource()
 
-    def _spy_speaker_factory(reachy_mini: object | None = None) -> SpeakerSink:
-        nonlocal speaker_factory_calls
-        speaker_factory_calls += 1
+    def _spy_speaker_factory(*, reachy_mini: object | None = None) -> SpeakerSink:
+        speaker_factory_kwargs.append({"reachy_mini": reachy_mini})
         return MockSpeakerSink()
+
+    sm_kwargs: list[dict[str, object]] = []
+
+    def _spy_sm(**kwargs: object) -> MagicMock:
+        sm_kwargs.append(kwargs)
+        return MagicMock()
 
     monkeypatch.setattr(
         "reachy_ducky_app.main.load_default_mic_source",
@@ -266,6 +281,10 @@ async def test_run_async_constructs_voice_with_default_mic_and_speaker(
     monkeypatch.setattr(
         "reachy_ducky_app.main.load_default_speaker_sink",
         _spy_speaker_factory,
+    )
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.EmbodimentStateMachine",
+        _spy_sm,
     )
 
     app = ReachyDuckyApp()
@@ -277,8 +296,18 @@ async def test_run_async_constructs_voice_with_default_mic_and_speaker(
         timeout=0.5,
     )
 
-    assert mic_factory_calls == 1
-    assert speaker_factory_calls == 1
+    assert len(mic_factory_kwargs) == 1
+    assert len(speaker_factory_kwargs) == 1
+    assert len(sm_kwargs) == 1
+    # Mic factory MUST have received a real MuteGate, and it MUST be the
+    # SAME instance that the state machine received. If main() ever
+    # constructs two separate gates, the (gate, mic-pump) invariant
+    # silently breaks: a MUTED transition on the SM would toggle one gate
+    # while the mic pump reads the other.
+    mic_gate = mic_factory_kwargs[0]["mute_gate"]
+    sm_gate = sm_kwargs[0]["mute_gate"]
+    assert isinstance(mic_gate, MuteGate)
+    assert mic_gate is sm_gate
 
 
 async def test_run_async_closes_daemon_client_even_when_turn_raises(
