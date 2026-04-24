@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator
 from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 from openai.types.realtime import (
     RealtimeErrorEvent,
@@ -28,6 +29,7 @@ from openai.types.realtime import (
 from openai.types.realtime.realtime_error import RealtimeError
 from openai.types.realtime.realtime_response import RealtimeResponse
 from reachy_ducky_app.voice.audio_io import (
+    AudioFrame,
     MicSource,
     MockMicSource,
     MockSpeakerSink,
@@ -37,6 +39,16 @@ from reachy_ducky_app.voice.openai_realtime import (
     OpenAIRealtimeVoiceTurn,
 )
 
+# OpenAI Realtime fixed sample rate for PCM16 mono — matches the
+# ``AudioPCM`` literal in the SDK and the ``_LLM_AUDIO_RATE`` constant
+# in ``openai_realtime.py``.
+_LLM_RATE = 24000
+
+
+def _frame(samples: np.ndarray, *, rate: int = _LLM_RATE) -> AudioFrame:
+    """Tuple-builder helper to keep test fixtures readable."""
+    return (rate, samples.astype(np.int16))
+
 
 class _FakeConnection:
     """Scripted stand-in for ``openai`` ``AsyncRealtimeConnection``.
@@ -45,8 +57,8 @@ class _FakeConnection:
     event sequence. The iterator records which events were consumed
     (``observed``) so tests can assert the drain went all the way to
     the terminal event and no further. ``response.create`` /
-    ``response.cancel`` and ``input_audio_buffer.append`` are
-    ``AsyncMock`` s so tests can assert the outbound side-effects.
+    ``response.cancel`` / ``session.update`` and ``input_audio_buffer.append``
+    are ``AsyncMock`` s so tests can assert the outbound side-effects.
     """
 
     def __init__(self, events: list[Any]) -> None:
@@ -55,6 +67,8 @@ class _FakeConnection:
         self.response = MagicMock()
         self.response.create = AsyncMock()
         self.response.cancel = AsyncMock()
+        self.session = MagicMock()
+        self.session.update = AsyncMock()
         self.input_audio_buffer = MagicMock()
         self.input_audio_buffer.append = AsyncMock()
 
@@ -84,19 +98,20 @@ class _InfiniteMicSource(MicSource):
 
     def __init__(self) -> None:
         self.yielded: int = 0
+        self._silence: AudioFrame = (_LLM_RATE, np.zeros(480, dtype=np.int16))
 
-    async def frames(self) -> AsyncIterator[bytes]:
+    async def frames(self) -> AsyncIterator[AudioFrame]:
         while True:
             self.yielded += 1
-            yield b"silence"
+            yield self._silence
             await asyncio.sleep(0)
 
 
 class _RaisingMicSource(MicSource):
     """Mic stub that yields one frame then raises — exercises error propagation."""
 
-    async def frames(self) -> AsyncIterator[bytes]:
-        yield b"first"
+    async def frames(self) -> AsyncIterator[AudioFrame]:
+        yield (_LLM_RATE, np.array([1, 2, 3], dtype=np.int16))
         raise RuntimeError("mic lost")
 
 
@@ -110,9 +125,9 @@ class _ImmediateRaisingMicSource(MicSource):
     stored by the time ``get_user_text`` returns an early transcript.
     """
 
-    async def frames(self) -> AsyncIterator[bytes]:
+    async def frames(self) -> AsyncIterator[AudioFrame]:
         raise RuntimeError("mic dead")
-        yield b""  # pragma: no cover — unreachable; keeps the function an async generator
+        yield (_LLM_RATE, np.zeros(0, dtype=np.int16))  # pragma: no cover — unreachable
 
 
 def _make_response_done(
@@ -271,10 +286,12 @@ async def test_start_turn_enters_and_exits_sdk_connect_manager(
     """
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
-    # Fake AsyncRealtimeConnection: start_turn does not touch any of its
-    # attrs — it just yields it as the turn's .connection. A plain
-    # MagicMock is enough.
+    # Fake AsyncRealtimeConnection: start_turn calls
+    # ``connection.session.update(session=...)`` after entering the
+    # connect manager, so ``.session.update`` must be an AsyncMock.
     fake_connection = MagicMock(name="AsyncRealtimeConnection")
+    fake_connection.session = MagicMock()
+    fake_connection.session.update = AsyncMock()
 
     # Fake AsyncRealtimeConnectionManager: an async context manager.
     connect_manager = MagicMock(name="AsyncRealtimeConnectionManager")
@@ -306,6 +323,22 @@ async def test_start_turn_enters_and_exits_sdk_connect_manager(
         # Turn forwards mic + speaker from the voice factory.
         assert turn._mic is mic
         assert turn._speaker is speaker
+        # session.update was issued before the turn body runs — pinning
+        # PCM16 24 kHz on both directions per the conversation-app
+        # reference (openai_realtime.py:504-521).
+        fake_connection.session.update.assert_awaited_once()
+        await_args = fake_connection.session.update.await_args
+        assert await_args is not None
+        session_kwarg = await_args.kwargs["session"]
+        assert session_kwarg["type"] == "realtime"
+        assert session_kwarg["audio"]["input"]["format"] == {
+            "type": "audio/pcm",
+            "rate": 24000,
+        }
+        assert session_kwarg["audio"]["output"]["format"] == {
+            "type": "audio/pcm",
+            "rate": 24000,
+        }
 
     # After the async-with in this test exits: manager must have been exited.
     connect_manager.__aexit__.assert_awaited_once()
@@ -320,6 +353,8 @@ async def test_start_turn_exits_sdk_connect_manager_on_exception(
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     fake_connection = MagicMock(name="AsyncRealtimeConnection")
+    fake_connection.session = MagicMock()
+    fake_connection.session.update = AsyncMock()
 
     connect_manager = MagicMock(name="AsyncRealtimeConnectionManager")
     connect_manager.__aenter__ = AsyncMock(return_value=fake_connection)
@@ -350,14 +385,17 @@ async def test_start_turn_exits_sdk_connect_manager_on_exception(
 
 @pytest.mark.asyncio
 async def test_get_user_text_pumps_mic_frames_as_base64_append_events() -> None:
-    """Mic frames are base64-encoded and sent via ``input_audio_buffer.append``.
+    """Mic frames are unpacked, ``.tobytes()``-serialized, and base64-appended.
 
     The original P1 bug: ``get_user_text`` iterated server events without
     ever pushing audio in, so the transcription event could never arrive.
     Now the method spawns a concurrent pump task that drains the mic
-    source and calls ``append(audio=<base64>)`` for each frame.
+    source, unpacks each :data:`AudioFrame` tuple at the network
+    boundary, and calls ``append(audio=<base64>)`` for each frame.
     """
-    mic = MockMicSource(frames=[b"f1", b"f2"])
+    samples_a = np.array([1, 2, 3, 4], dtype=np.int16)
+    samples_b = np.array([5, 6, 7, 8], dtype=np.int16)
+    mic = MockMicSource(frames=[_frame(samples_a), _frame(samples_b)])
     speaker = MockSpeakerSink()
     connection = _FakeConnection(events=[_make_transcription_completed("hi")])
 
@@ -366,13 +404,14 @@ async def test_get_user_text_pumps_mic_frames_as_base64_append_events() -> None:
     result = await asyncio.wait_for(turn.get_user_text(), timeout=1.0)
 
     assert result == "hi"
-    # Both scripted frames were appended, in order, base64-encoded.
+    # Both scripted frames were appended, in order, base64-encoded from
+    # the underlying int16 ``.tobytes()``.
     assert connection.input_audio_buffer.append.await_count == 2
     connection.input_audio_buffer.append.assert_any_await(
-        audio=base64.b64encode(b"f1").decode("ascii")
+        audio=base64.b64encode(samples_a.tobytes()).decode("ascii")
     )
     connection.input_audio_buffer.append.assert_any_await(
-        audio=base64.b64encode(b"f2").decode("ascii")
+        audio=base64.b64encode(samples_b.tobytes()).decode("ascii")
     )
 
 
@@ -420,7 +459,7 @@ async def test_get_user_text_propagates_mic_errors() -> None:
 
     # The one pre-raise frame was pumped, proving the pump ran before failing.
     connection.input_audio_buffer.append.assert_awaited_once_with(
-        audio=base64.b64encode(b"first").decode("ascii")
+        audio=base64.b64encode(np.array([1, 2, 3], dtype=np.int16).tobytes()).decode("ascii")
     )
 
 
@@ -482,11 +521,14 @@ async def test_speak_text_pipes_audio_deltas_to_speaker() -> None:
 
     The original P1 bug: ``speak_text`` drained to ``response.done`` but
     ignored ``response.output_audio.delta`` events, so the robot's
-    speaker never heard the TTS audio. Now each delta is base64-decoded
-    and forwarded to ``speaker.play(pcm)``.
+    speaker never heard the TTS audio. Now each delta is base64-decoded,
+    wrapped as an :data:`AudioFrame` ``(24000, int16 ndarray)`` tuple,
+    and forwarded to ``speaker.play(frame)``.
     """
-    delta1 = _make_audio_delta(b"pcm1", event_id="a1")
-    delta2 = _make_audio_delta(b"pcm2", event_id="a2")
+    pcm_a = np.array([100, 200, 300], dtype=np.int16)
+    pcm_b = np.array([400, 500, 600], dtype=np.int16)
+    delta1 = _make_audio_delta(pcm_a.tobytes(), event_id="a1")
+    delta2 = _make_audio_delta(pcm_b.tobytes(), event_id="a2")
     done = _make_response_done("completed")
     connection = _FakeConnection(events=[delta1, delta2, done])
 
@@ -500,7 +542,11 @@ async def test_speak_text_pipes_audio_deltas_to_speaker() -> None:
     await turn.speak_text("hi")
 
     connection.response.create.assert_awaited_once()
-    assert speaker.played == [b"pcm1", b"pcm2"]
+    assert len(speaker.played) == 2
+    assert speaker.played[0][0] == _LLM_RATE
+    np.testing.assert_array_equal(speaker.played[0][1], pcm_a)
+    assert speaker.played[1][0] == _LLM_RATE
+    np.testing.assert_array_equal(speaker.played[1][1], pcm_b)
     # Drain consumed all three events and stopped at the terminal one.
     assert connection.observed == [delta1, delta2, done]
 
@@ -508,9 +554,11 @@ async def test_speak_text_pipes_audio_deltas_to_speaker() -> None:
 @pytest.mark.asyncio
 async def test_speak_text_ignores_non_delta_events_while_piping_audio() -> None:
     """Deltas interleaved with non-audio events: only deltas reach the speaker."""
-    delta1 = _make_audio_delta(b"A")
+    pcm_a = np.array([10, 20], dtype=np.int16)
+    pcm_b = np.array([30, 40], dtype=np.int16)
+    delta1 = _make_audio_delta(pcm_a.tobytes())
     interstitial = MagicMock(name="unrelated_event")
-    delta2 = _make_audio_delta(b"B")
+    delta2 = _make_audio_delta(pcm_b.tobytes())
     done = _make_response_done("completed")
     connection = _FakeConnection(events=[delta1, interstitial, delta2, done])
 
@@ -524,7 +572,9 @@ async def test_speak_text_ignores_non_delta_events_while_piping_audio() -> None:
     await turn.speak_text("hi")
 
     connection.response.create.assert_awaited_once()
-    assert speaker.played == [b"A", b"B"]
+    assert len(speaker.played) == 2
+    np.testing.assert_array_equal(speaker.played[0][1], pcm_a)
+    np.testing.assert_array_equal(speaker.played[1][1], pcm_b)
     assert connection.observed == [delta1, interstitial, delta2, done]
 
 

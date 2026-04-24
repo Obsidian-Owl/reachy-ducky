@@ -74,9 +74,31 @@ def test_media_manager_exposes_audio_sample_methods() -> None:
     )
 
 
+def test_media_manager_exposes_samplerate_methods() -> None:
+    """``MediaManager`` exposes the samplerate queries our adapter design relies on.
+
+    ``ReachyMicSource`` / ``ReachySpeakerSink`` hardcode ``_SDK_AUDIO_RATE
+    = 16000`` (matches ``AudioBase.SAMPLE_RATE``) for the resample math,
+    but the canonical reference (``console.py:571``) reads
+    ``get_input_audio_samplerate()`` / ``get_output_audio_samplerate()``
+    at runtime. Pinning the class-surface presence here means an upstream
+    rename surfaces in CI before our hardcoded value silently goes stale
+    — the kind of drift the M1 review flagged as invisible without an
+    explicit guard.
+    """
+    assert hasattr(MediaManager, "get_input_audio_samplerate"), (
+        "MediaManager.get_input_audio_samplerate missing — drift guard for "
+        "ReachyMicSource resample rate"
+    )
+    assert hasattr(MediaManager, "get_output_audio_samplerate"), (
+        "MediaManager.get_output_audio_samplerate missing — drift guard for "
+        "ReachySpeakerSink resample rate"
+    )
+
+
 @pytest.mark.hardware
-def test_get_audio_sample_returns_non_empty_buffer() -> None:
-    """``get_audio_sample`` eventually yields a non-empty float32 buffer.
+def test_get_audio_sample_returns_non_empty_stereo_buffer() -> None:
+    """``get_audio_sample`` eventually yields a non-empty stereo float32 array.
 
     The SDK documents ``Optional[NDArray[np.float32]]`` — ``None`` is a
     legitimate "GStreamer ring buffer has no data yet" response,
@@ -84,6 +106,11 @@ def test_get_audio_sample_returns_non_empty_buffer() -> None:
     flowing. Polls up to 2s so this pins "the method eventually yields"
     rather than "the method returns non-None on the first call"
     (which would race).
+
+    The ``(N, 2)`` shape is the real SDK contract (``audio_base.py:61`` —
+    ``np.frombuffer(..., dtype=np.float32).reshape(-1, 2)``). Pin it
+    explicitly so a shape change surfaces here before the adapter
+    silently produces corrupted audio at the channel-pick step.
     """
     mini = ReachyMini()
     deadline = time.monotonic() + 2.0
@@ -95,6 +122,9 @@ def test_get_audio_sample_returns_non_empty_buffer() -> None:
     assert sample is not None, "get_audio_sample kept returning None for 2s — mic not primed?"
     assert sample.size > 0, f"get_audio_sample yielded empty array ({sample!r})"
     assert sample.dtype == np.float32, f"expected float32 per SDK contract, got {sample.dtype}"
+    assert sample.ndim == 2 and sample.shape[1] == 2, (
+        f"expected stereo (N, 2) per audio_base.py:61, got {sample.shape}"
+    )
 
 
 @pytest.mark.hardware
