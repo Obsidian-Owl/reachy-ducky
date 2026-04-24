@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from reachy_ducky_protocol.messages import State
 
+from ..mute import MuteGate
 from .motion_driver import MotionDriver
 
 # State -> emotion-library move name. Keep in sync with the design doc §11
@@ -27,11 +28,23 @@ class EmbodimentStateMachine:
       target-state ``play_move`` so the robot is upright before it moves.
     - ``IDLE``/``LISTENING``/``THINKING`` transitions call
       ``play_move(<name>)`` per :data:`_STATE_TO_MOVE`.
+
+    When a :class:`MuteGate` is supplied via the keyword-only ``mute_gate``
+    kwarg, the gate is set muted on entry to ``MUTED`` and cleared on exit.
+    The gate toggle happens BEFORE motion dispatch so observers that race
+    on the transition see a consistent ``(gate, motion)`` pair. Passing
+    ``mute_gate=None`` (the default) skips the toggle entirely.
     """
 
-    def __init__(self, driver: MotionDriver) -> None:
+    def __init__(
+        self,
+        driver: MotionDriver,
+        *,
+        mute_gate: MuteGate | None = None,
+    ) -> None:
         self._driver = driver
         self._state: State = State.IDLE
+        self._mute_gate = mute_gate
 
     @property
     def state(self) -> State:
@@ -40,6 +53,11 @@ class EmbodimentStateMachine:
     def transition(self, target: State) -> None:
         if target == self._state:
             return
+        if self._mute_gate is not None:
+            if target == State.MUTED:
+                self._mute_gate.set_muted(True)
+            elif self._state == State.MUTED:
+                self._mute_gate.set_muted(False)
         if target == State.MUTED:
             self._driver.go_to_sleep()
         else:

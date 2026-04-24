@@ -8,6 +8,7 @@ from reachy_ducky_app.embodiment import (
     MockMotionDriver,
     MotionDriver,
 )
+from reachy_ducky_app.mute import MuteGate
 from reachy_ducky_protocol.messages import State
 
 
@@ -159,3 +160,41 @@ def test_every_state_has_entry_handling(target: State) -> None:
     sm = EmbodimentStateMachine(driver)
     sm.transition(target)
     assert sm.state == target
+
+
+def test_transition_to_muted_sets_mute_gate() -> None:
+    """Transitioning the state machine into MUTED toggles the MuteGate.
+
+    Earliest-boundary mute coordination: downstream consumers (mic pump,
+    VU meter, head wobble) all see the gate state change without each
+    needing its own transition subscription.
+    """
+    gate = MuteGate()
+    driver = MockMotionDriver()
+    sm = EmbodimentStateMachine(driver, mute_gate=gate)
+
+    assert gate.muted is False
+    sm.transition(State.MUTED)
+    assert gate.muted is True
+
+
+def test_transition_out_of_muted_clears_mute_gate() -> None:
+    """Leaving MUTED clears the gate symmetrically."""
+    gate = MuteGate()
+    driver = MockMotionDriver()
+    sm = EmbodimentStateMachine(driver, mute_gate=gate)
+
+    sm.transition(State.MUTED)
+    assert gate.muted is True
+    sm.transition(State.IDLE)
+    assert gate.muted is False
+
+
+def test_state_machine_without_mute_gate_still_works() -> None:
+    """``mute_gate=None`` is back-compat: no gate calls; transitions still fire."""
+    driver = MockMotionDriver()
+    sm = EmbodimentStateMachine(driver)  # No mute_gate kwarg.
+    sm.transition(State.MUTED)
+    assert sm.state == State.MUTED
+    # Driver still got the visible sleep posture (existing behaviour).
+    assert driver.went_to_sleep is True
