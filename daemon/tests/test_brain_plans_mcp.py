@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from reachy_ducky_daemon.brain.plans_mcp import (
     _CONVENTIONAL_PATTERNS,
+    _discover,
     _make_plans_tools,
     _read_plan,
     list_plans,
@@ -784,3 +785,46 @@ def test_read_plan_rejects_escaped_symlink(tmp_path: Path) -> None:
 
     with pytest.raises(PermissionError, match="escapes project root|not a plan"):
         _read_plan(project, "docs/plans/escape.md")
+
+
+def test_read_plan_rejects_symlinked_parent_directory(tmp_path: Path) -> None:
+    """Symlinked parent directories can't smuggle non-plan files into the set.
+
+    Python 3.12's Path.glob follows symlinked directories by default.
+    Without the parent-symlink check, a plan-shaped path like
+    ``docs/plans/evil_dir/leaked.md`` where ``evil_dir -> daemon/src``
+    would have been readable. Second attack vector of the same class
+    as C.3a (file-symlink); same security property.
+    """
+    project = tmp_path / "project"
+    (project / "docs" / "plans").mkdir(parents=True)
+    src_dir = project / "daemon" / "src"
+    src_dir.mkdir(parents=True)
+
+    leaked = src_dir / "leaked.md"
+    leaked.write_text("# maybe-a-secret\n")
+
+    evil_dir = project / "docs" / "plans" / "evil_dir"
+    evil_dir.symlink_to(src_dir)
+
+    with pytest.raises(PermissionError, match="not a plan"):
+        _read_plan(project, "docs/plans/evil_dir/leaked.md")
+
+
+def test_discover_rejects_hits_under_symlinked_parent(tmp_path: Path) -> None:
+    """Direct ``_discover`` check: paths under a symlinked parent are
+    not in the result set. Complements the ``_read_plan``-level test."""
+    project = tmp_path / "project"
+    (project / "docs" / "plans").mkdir(parents=True)
+    src_dir = project / "daemon" / "src"
+    src_dir.mkdir(parents=True)
+
+    (src_dir / "a.md").write_text("# a\n")
+    (project / "docs" / "plans" / "legit.md").write_text("# legit\n")
+
+    (project / "docs" / "plans" / "evil_dir").symlink_to(src_dir)
+
+    paths = _discover(project)
+
+    assert (project / "docs" / "plans" / "legit.md").resolve() in paths
+    assert (src_dir / "a.md").resolve() not in paths

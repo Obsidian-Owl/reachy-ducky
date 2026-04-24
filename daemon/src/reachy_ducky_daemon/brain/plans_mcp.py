@@ -11,8 +11,10 @@ Exposes two read-only tools over ``create_sdk_mcp_server``:
     1. the resolved target path must stay inside the project root (``..``
        traversal and absolute paths are rejected by ``_read_plan``'s own
        ``is_relative_to`` check; external-target symlinks are denied in
-       :func:`_discover`, which silently drops any symlink hit at
-       discovery time so the symlink itself is never admitted);
+       :func:`_discover`, which silently drops any hit reached through a
+       symlink — both symlink FILES and files reached through symlink
+       DIRECTORIES — so neither the symlink itself nor a non-symlink
+       leaf under a symlinked parent is ever admitted);
     2. the resolved target must be one of the files that :func:`_discover`
        would advertise (``read_plan`` is not a general-purpose file
        reader — daemon source and secrets are denied even if they exist).
@@ -108,6 +110,33 @@ _CONVENTIONAL_PATTERNS: tuple[str, ...] = (
 )
 
 
+def _chain_has_symlink(path: Path, base: Path) -> bool:
+    """Return True if ``path`` or any ancestor up to (not including)
+    ``base`` is a symlink.
+
+    Walks parent-ward from ``path`` until we hit ``base``. If any step
+    is a symlink, the chain is tainted and the caller should reject.
+    If ``path`` isn't under ``base``, returns True conservatively
+    (shouldn't happen given glob's contract, but belt-and-suspenders).
+    Python 3.12's ``Path.glob`` follows symlinked directories by
+    default (``recurse_symlinks=False`` is 3.13+ only); this walk is
+    the portable equivalent.
+    """
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return True  # Not under base — treat as tainted.
+    current = path
+    while current != base:
+        if current.is_symlink():
+            return True
+        parent = current.parent
+        if parent == current:  # Root — shouldn't happen, but bail out.
+            return True
+        current = parent
+    return False
+
+
 def _discover(base: Path) -> set[Path]:
     """Return the absolute paths of every file under ``base`` matched by any
     conventional pattern.
@@ -119,33 +148,23 @@ def _discover(base: Path) -> set[Path]:
     not ``base/nested/AGENTS.md``. That anchoring is what makes the read
     surface exactly as wide as the discover surface.
 
-    **Symlinks are skipped at discovery.** A symlink under a conventional
-    plan path is not added to the result set by its own glob match — so
-    a plan-shaped link pointing at a non-plan target (e.g.
-    ``docs/plans/escape.md -> daemon/src/foo.py``) cannot smuggle its
-    target into the membership set. A link pointing at another
-    conventional plan (``docs/plans/link.md -> docs/plans/real.md``) is
-    still readable via :func:`_read_plan` because the target enters the
-    set via its own pattern match and ``_read_plan``'s ``.resolve()``
-    follows the link transparently — that's fine because the attacker
-    gains nothing they couldn't get by reading the target directly.
+    **Symlinks are skipped at discovery — both symlink FILES and files
+    reached through symlink DIRECTORIES.** Python 3.12's ``Path.glob``
+    follows symlinked directories by default, so a check on the leaf
+    hit alone isn't enough. :func:`_chain_has_symlink` walks from the
+    hit up to ``base`` and rejects if any step is a symlink — covers
+    both ``docs/plans/link.md -> X`` (file symlink) and
+    ``docs/plans/evil_dir/leaked.md`` where ``evil_dir -> daemon/src``
+    (parent-dir symlink). Transparent-follow symlinks to conventional
+    plan paths are still readable: the target enters the set via its
+    own pattern match and ``_read_plan.resolve()`` follows the link.
     """
     results: set[Path] = set()
     for pattern in _CONVENTIONAL_PATTERNS:
         for hit in base.glob(pattern):
             if not hit.is_file():
                 continue
-            if hit.is_symlink():
-                # Skip the symlink hit itself so a plan-shaped link
-                # pointing at a non-plan target (``docs/plans/escape.md
-                # -> daemon/src/foo.py``) cannot smuggle its target into
-                # the membership set via its own glob match. A link to
-                # another conventional plan is still readable because
-                # the target enters the set via its own pattern match
-                # and ``_read_plan``'s ``.resolve()`` follows the link
-                # transparently — same content as reading the target
-                # directly; no security gain for an attacker. See the
-                # module docstring's security invariants.
+            if _chain_has_symlink(hit, base):
                 continue
             resolved = hit.resolve()
             if not resolved.is_relative_to(base):
