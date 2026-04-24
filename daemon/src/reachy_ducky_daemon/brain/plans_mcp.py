@@ -8,11 +8,21 @@ Exposes two read-only tools over ``create_sdk_mcp_server``:
 * ``read_plan`` — read a single plan/spec file by its project-relative path,
   with two non-negotiable security properties:
 
-    1. the resolved target path must stay inside the project root
-       (``..`` traversal, absolute paths, and symlink escapes are denied);
-    2. the target path must be one of the files that :func:`_discover` would
-       advertise (``read_plan`` is not a general-purpose file reader — daemon
-       source and secrets are denied even if they exist).
+    1. the resolved target path must stay inside the project root (``..``
+       traversal and absolute paths are rejected by ``_read_plan``'s own
+       ``is_relative_to`` check; external-target symlinks are denied in
+       :func:`_discover`, which silently drops any hit reached through a
+       symlink — both symlink FILES and files reached through symlink
+       DIRECTORIES — so neither the symlink itself nor a non-symlink
+       leaf under a symlinked parent is ever admitted);
+    2. the resolved target must be one of the files that :func:`_discover`
+       would advertise (``read_plan`` is not a general-purpose file
+       reader — daemon source and secrets are denied even if they exist).
+       Internal-target symlinks pointing at non-plan paths are rejected
+       here (the non-plan target is not in the set). Internal-target
+       symlinks pointing at a conventional plan transparently follow to
+       the target — same content as reading the target directly; no
+       security gain for an attacker.
 
 The tool surface is intentionally tiny: Claude uses its built-in ``Read`` /
 ``Glob`` / ``Grep`` tools (gated by the PreToolUse security hook) for
@@ -100,6 +110,33 @@ _CONVENTIONAL_PATTERNS: tuple[str, ...] = (
 )
 
 
+def _chain_has_symlink(path: Path, base: Path) -> bool:
+    """Return True if ``path`` or any ancestor up to (not including)
+    ``base`` is a symlink.
+
+    Walks parent-ward from ``path`` until we hit ``base``. If any step
+    is a symlink, the chain is tainted and the caller should reject.
+    If ``path`` isn't under ``base``, returns True conservatively
+    (shouldn't happen given glob's contract, but belt-and-suspenders).
+    Python 3.12's ``Path.glob`` follows symlinked directories by
+    default (``recurse_symlinks=False`` is 3.13+ only); this walk is
+    the portable equivalent.
+    """
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return True  # Not under base — treat as tainted.
+    current = path
+    while current != base:
+        if current.is_symlink():
+            return True
+        parent = current.parent
+        if parent == current:  # Root — shouldn't happen, but bail out.
+            return True
+        current = parent
+    return False
+
+
 def _discover(base: Path) -> set[Path]:
     """Return the absolute paths of every file under ``base`` matched by any
     conventional pattern.
@@ -111,25 +148,25 @@ def _discover(base: Path) -> set[Path]:
     not ``base/nested/AGENTS.md``. That anchoring is what makes the read
     surface exactly as wide as the discover surface.
 
-    Symlink-escape filter: a hit whose ``.resolve()`` lands outside ``base`` is
-    silently dropped. The plans MCP tool surface — :func:`list_plans`
-    (discovery) and :func:`_read_plan` (read with membership check) — both
-    read from this set, so neither can return or accept an escape-resolving
-    path. Closed via #8.
+    **Symlinks are skipped at discovery — both symlink FILES and files
+    reached through symlink DIRECTORIES.** Python 3.12's ``Path.glob``
+    follows symlinked directories by default, so a check on the leaf
+    hit alone isn't enough. :func:`_chain_has_symlink` walks from the
+    hit up to ``base`` and rejects if any step is a symlink — covers
+    both ``docs/plans/link.md -> X`` (file symlink) and
+    ``docs/plans/evil_dir/leaked.md`` where ``evil_dir -> daemon/src``
+    (parent-dir symlink). Transparent-follow symlinks to conventional
+    plan paths are still readable: the target enters the set via its
+    own pattern match and ``_read_plan.resolve()`` follows the link.
     """
     results: set[Path] = set()
     for pattern in _CONVENTIONAL_PATTERNS:
         for hit in base.glob(pattern):
             if not hit.is_file():
                 continue
+            if _chain_has_symlink(hit, base):
+                continue
             resolved = hit.resolve()
-            # Reject symlinks whose resolved target escapes ``base``.
-            # ``is_relative_to`` (Python 3.9+) is the non-raising form
-            # of the same check ``_read_plan`` uses. Filtering here
-            # means both ``list_plans`` (discovery) and ``_read_plan``
-            # (membership check) inherit the property for free — no
-            # escaping path can be advertised, read, or leaked via
-            # diagnostic. (#8)
             if not resolved.is_relative_to(base):
                 continue
             results.add(resolved)
@@ -153,11 +190,17 @@ def _read_plan(project_root: Path, rel_path: str) -> str:
 
     Raises:
         PermissionError: if ``rel_path`` resolves outside ``project_root``
-            (``..`` escape, absolute path, symlink escape), or if the
-            resolved path is not one of the files that :func:`_discover`
-            would advertise. The membership check fires regardless of
-            whether the path exists on disk, so probing non-plan locations
-            cannot be used as an existence oracle for arbitrary files.
+            (``..`` escape, absolute path), or if the resolved path is not
+            one of the files that :func:`_discover` would advertise.
+            Because :func:`_discover` skips symlink hits at discovery,
+            a plan-shaped symlink pointing at a non-plan target fails
+            the membership check as "not a plan or spec file"; a
+            plan-shaped symlink pointing at another conventional plan
+            resolves to the target and reads transparently (same content
+            as reading the target directly — no security gain). The
+            membership check fires regardless of whether the path exists
+            on disk, so probing non-plan locations cannot be used as an
+            existence oracle for arbitrary files.
         OSError: subclasses (``FileNotFoundError``, ``PermissionError`` from
             the filesystem, etc.) surface from ``read_text``.
         UnicodeDecodeError: if the file exists and is advertised but isn't

@@ -17,11 +17,10 @@ def test_brain_request_serializes() -> None:
     req = BrainRequest(
         user_utterance="what's on my branch?",
         project_slug="reachy-ducky",
-        include_tools=["git", "gh", "fs", "plans"],
     )
     data = req.model_dump()
     assert data["user_utterance"] == "what's on my branch?"
-    assert "git" in data["include_tools"]
+    assert data["project_slug"] == "reachy-ducky"
 
 
 def test_brain_response_round_trip() -> None:

@@ -111,6 +111,24 @@ protocol/    Shared Pydantic messages between daemon ↔ app
 - Conventional commits (`feat:`, `fix:`, `chore:`, `docs:`, `test:`, `refactor:`).
 - **No `--no-verify`. No force-push. No `git reset --hard` on shared branches.**
 
+### Auto-merge for Dependabot + safe PRs
+
+The repo allows auto-merge on PRs that pass required CI. Enable selectively:
+
+```bash
+# Safe: dev-tool-only Dependabot bumps (after required checks pass)
+gh pr merge <pr-url> --auto --squash --delete-branch
+
+# Manual review required: any PR touching runtime deps, source code,
+# or configuration with behavioural impact. Don't --auto these.
+```
+
+Required status checks on `main` (as of 2026-04-24):
+- `Lint, type-check, unit tests (ubuntu-latest)`
+- `Lint, type-check, unit tests (macos-latest)`
+
+`sdk-contract.yml` was removed in PR #65 (canonical dep migration); its introspection tests now run in the default CI tier. `windows-latest` (Phase 3) lands as informative-only and is not required.
+
 ---
 
 ## Memory (daemon)
