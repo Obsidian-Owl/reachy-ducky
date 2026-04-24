@@ -4,8 +4,9 @@ Wraps the OpenAI Python SDK's realtime WebSocket session behind our
 :class:`~reachy_ducky_app.voice.interface.VoiceInterface`. The SDK handles
 STT + TTS + turn-taking + barge-in at the protocol level; our job is to
 plumb the events through our narrow :class:`VoiceTurn` contract and to
-shuttle raw PCM between the :class:`MicSource` / :class:`SpeakerSink`
-abstractions and the SDK's base64-framed audio events.
+shuttle :data:`AudioFrame` tuples between the :class:`MicSource` /
+:class:`SpeakerSink` abstractions and the SDK's base64-framed audio
+events.
 
 **Not run in unit tests.** The stateful session methods require a live
 connection to OpenAI. Unit coverage is construction-shape only (API-key
@@ -41,8 +42,9 @@ so this module adapts:
    ``type`` literal is ``"conversation.item.input_audio_transcription.completed"``
    and whose ``.transcript`` attribute carries the text.
 
-4. **Mic in.** Raw PCM frames from the :class:`MicSource` are
-   base64-encoded and sent via
+4. **Mic in.** :data:`AudioFrame` tuples from the :class:`MicSource` are
+   unpacked at the network boundary: int16 samples are ``.tobytes()``'d,
+   base64-encoded, and sent via
    ``conn.input_audio_buffer.append(audio=<base64>)``. With the default
    server-VAD ``turn_detection``, the server commits the buffer and
    triggers transcription on its own — no explicit ``.commit()`` call is
@@ -53,9 +55,10 @@ so this module adapts:
 
 5. **Speaker out.** Assistant TTS audio arrives as a stream of
    ``ResponseAudioDeltaEvent`` (``response.output_audio.delta``) whose
-   ``.delta`` attribute is a base64-encoded PCM payload. We decode each
-   delta and forward the raw bytes to :meth:`SpeakerSink.play` — the
-   transport-tier implementation decides how to buffer and render.
+   ``.delta`` attribute is a base64-encoded PCM16 mono 24 kHz payload.
+   We decode each delta, wrap the int16 samples as an :data:`AudioFrame`
+   tuple, and forward to :meth:`SpeakerSink.play` — the transport-tier
+   implementation decides how to buffer, resample, and render.
 
 6. **Response create/cancel.** ``conn.response.create(response=params)`` —
    param field is ``output_modalities`` (not ``modalities`` as in the plan
@@ -98,8 +101,11 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+import numpy as np
+import numpy.typing as npt
+import scipy.signal
 from openai.types.realtime import (
     RealtimeErrorEvent,
     ResponseAudioDeltaEvent,
@@ -108,14 +114,30 @@ from openai.types.realtime import (
 from openai.types.realtime.conversation_item_input_audio_transcription_completed_event import (
     ConversationItemInputAudioTranscriptionCompletedEvent,
 )
+from openai.types.realtime.realtime_audio_config_input_param import (
+    RealtimeAudioConfigInputParam,
+)
+from openai.types.realtime.realtime_audio_config_output_param import (
+    RealtimeAudioConfigOutputParam,
+)
+from openai.types.realtime.realtime_audio_config_param import RealtimeAudioConfigParam
+from openai.types.realtime.realtime_audio_formats_param import AudioPCM
+from openai.types.realtime.realtime_session_create_request_param import (
+    RealtimeSessionCreateRequestParam,
+)
 
-from .audio_io import MicSource, SpeakerSink
+from .audio_io import AudioFrame, MicSource, SpeakerSink
 from .interface import VoiceInterface, VoiceTurn
 
 if TYPE_CHECKING:
     from openai.resources.realtime.realtime import AsyncRealtimeConnection
 
 logger = logging.getLogger(__name__)
+
+# OpenAI Realtime expects PCM16 mono at 24 kHz on both directions; ``AudioPCM``
+# in the SDK pins ``rate: Literal[24000]`` so this is the canonical sample
+# rate for both ``input_audio_buffer.append`` and ``response.output_audio.delta``.
+_LLM_AUDIO_RATE = 24000
 
 
 class OpenAIRealtimeVoiceTurn(VoiceTurn):
@@ -152,8 +174,9 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
         Two concurrent tasks run:
 
         * A **mic pump** that iterates :meth:`MicSource.frames`,
-          base64-encodes each raw PCM frame, and calls
-          ``connection.input_audio_buffer.append(audio=<base64>)``.
+          unpacks each :data:`AudioFrame` tuple at the network
+          boundary, ``.tobytes()`` + base64-encodes the int16 samples,
+          and calls ``connection.input_audio_buffer.append(audio=<base64>)``.
           With server-VAD turn_detection (the SDK default) the server
           decides when speech has ended and commits the buffer itself.
         * The **event drain** on ``self._connection``, which returns the
@@ -171,7 +194,28 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
 
         async def _pump_mic() -> None:
             async for frame in self._mic.frames():
-                b64 = base64.b64encode(frame).decode("ascii")
+                sample_rate, int16 = frame
+                # Resample to OpenAI's 24 kHz if the MicSource yields a
+                # different rate. Mirrors the reference's per-frame
+                # resample pattern (openai_realtime.py:763-764 in
+                # pollen-robotics/reachy_mini_conversation_app).
+                # ``ReachyMicSource`` always yields 24 kHz, but this
+                # guards future sources (sim, other hardware) against
+                # chipmunk/slow playback if they yield at a different
+                # rate.
+                if sample_rate != _LLM_AUDIO_RATE:
+                    resampled = cast(
+                        npt.NDArray[np.float32],
+                        scipy.signal.resample(
+                            int16.astype(np.float32),
+                            int(len(int16) * _LLM_AUDIO_RATE / sample_rate),
+                        ),
+                    )
+                    int16 = np.clip(resampled, -32768, 32767).astype(np.int16)
+                # OpenAI Realtime expects raw PCM16 little-endian bytes
+                # in base64. The network boundary just serializes.
+                pcm_bytes = int16.tobytes()
+                b64 = base64.b64encode(pcm_bytes).decode("ascii")
                 await self._connection.input_audio_buffer.append(audio=b64)
 
         pump_task = asyncio.create_task(_pump_mic())
@@ -218,8 +262,9 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
         text output modalities. The SDK streams audio chunks over the
         WebSocket as ``response.output_audio.delta`` events
         (:class:`ResponseAudioDeltaEvent`); each ``.delta`` field is a
-        base64-encoded PCM payload that we decode and forward to
-        :meth:`SpeakerSink.play`.
+        base64-encoded PCM16 mono 24 kHz payload that we decode, wrap as
+        an :data:`AudioFrame` tuple ``(24000, int16_array)``, and forward
+        to :meth:`SpeakerSink.play`.
 
         Drains the connection's event iterator until the terminal
         ``response.done`` (completed / cancelled / failed / incomplete)
@@ -240,8 +285,14 @@ class OpenAIRealtimeVoiceTurn(VoiceTurn):
         )
         async for event in self._connection:
             if isinstance(event, ResponseAudioDeltaEvent):
-                pcm = base64.b64decode(event.delta)
-                await self._speaker.play(pcm)
+                pcm_bytes = base64.b64decode(event.delta)
+                int16 = np.frombuffer(pcm_bytes, dtype=np.int16)
+                # NOTE: ``np.frombuffer`` produces a read-only view over
+                # the decoded bytes. The downstream sink may need to
+                # reshape or apply post-processing; ``.copy()`` makes
+                # that safe and is cheap relative to the WebSocket I/O.
+                frame: AudioFrame = (_LLM_AUDIO_RATE, int16.copy())
+                await self._speaker.play(frame)
                 continue
             if isinstance(event, ResponseDoneEvent):
                 status = event.response.status
@@ -278,9 +329,9 @@ class OpenAIRealtimeVoice(VoiceInterface):
     ``mic`` and ``speaker`` are required. Production code wires them via
     :func:`~reachy_ducky_app.voice.audio_io.load_default_mic_source` and
     :func:`~reachy_ducky_app.voice.audio_io.load_default_speaker_sink`
-    (today a silent mock, eventually the Reachy hardware bindings).
-    Tests can pass :class:`MockMicSource` /
-    :class:`MockSpeakerSink` directly.
+    (today the silent mock or the hardware-backed adapter, depending on
+    whether a ``ReachyMini`` is supplied). Tests can pass
+    :class:`MockMicSource` / :class:`MockSpeakerSink` directly.
     """
 
     def __init__(
@@ -309,6 +360,14 @@ class OpenAIRealtimeVoice(VoiceInterface):
         our ``finally``-equivalent drives the SDK manager's ``__aexit__``
         and the websocket is released.
 
+        After the connection opens we issue a ``session.update`` to pin
+        PCM16 at 24 kHz on both directions explicitly — matching the
+        reference conversation app's
+        ``openai_realtime.py:504-521`` pattern. The Realtime API would
+        default to PCM16/24 kHz here too (it's the only ``AudioPCM`` rate
+        the SDK type allows), but the explicit pin documents intent and
+        protects against future SDK default drift.
+
         Lazy-imports :class:`openai.AsyncOpenAI` so unit tests that only
         exercise construction-shape don't pay the SDK's import cost.
         """
@@ -316,6 +375,23 @@ class OpenAIRealtimeVoice(VoiceInterface):
 
         client = AsyncOpenAI(api_key=self._api_key)
         async with client.realtime.connect(model=self._model) as connection:
+            # The SDK's ``AudioPCM`` pins ``rate: Literal[24000]`` — the
+            # only PCM rate the Realtime API accepts. Passing the literal
+            # ``24000`` directly satisfies the TypedDict; the
+            # ``_LLM_AUDIO_RATE`` constant elsewhere in the module
+            # documents the same value at the audio-conversion sites.
+            session_config = RealtimeSessionCreateRequestParam(
+                type="realtime",
+                audio=RealtimeAudioConfigParam(
+                    input=RealtimeAudioConfigInputParam(
+                        format=AudioPCM(type="audio/pcm", rate=24000),
+                    ),
+                    output=RealtimeAudioConfigOutputParam(
+                        format=AudioPCM(type="audio/pcm", rate=24000),
+                    ),
+                ),
+            )
+            await connection.session.update(session=session_config)
             yield OpenAIRealtimeVoiceTurn(
                 connection,
                 mic=self._mic,

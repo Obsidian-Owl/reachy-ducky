@@ -76,6 +76,17 @@ ignore_missing_imports = true
 module = "mediapipe"
 ignore_missing_imports = true
 
+# scipy is a transitive dep via reachy-mini (used by ReachyMicSource /
+# ReachySpeakerSink for FFT-based resampling matching the conversation-app
+# reference). The wheel ships no py.typed marker; ``scipy-stubs`` exists
+# upstream but is not pulled in. The adapters use a narrow surface
+# (``scipy.signal.resample``) and validate shape via the test fixtures,
+# so suppressing the missing-stub error here keeps mypy --strict happy
+# without dragging in a stub package whose churn outweighs its value.
+[[tool.mypy.overrides]]
+module = "scipy.*"
+ignore_missing_imports = true
+
 # Pyright config lives in ./pyrightconfig.json (takes precedence over
 # [tool.pyright] here; pyrightconfig.json is more reliably live-reloaded
 # by IDE language servers). Pyright doesn't support per-module
