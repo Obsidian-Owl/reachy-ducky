@@ -31,9 +31,11 @@ class EmbodimentStateMachine:
 
     When a :class:`MuteGate` is supplied via the keyword-only ``mute_gate``
     kwarg, the gate is set muted on entry to ``MUTED`` and cleared on exit.
-    The gate toggle happens BEFORE motion dispatch so observers that race
-    on the transition see a consistent ``(gate, motion)`` pair. Passing
-    ``mute_gate=None`` (the default) skips the toggle entirely.
+    The transition is atomic on success: motion completes, then state +
+    gate update together. If a driver call raises, the state machine stays
+    in the prior state and the gate stays in its prior position — no
+    desync. Passing ``mute_gate=None`` (the default) skips the toggle
+    entirely.
     """
 
     def __init__(
@@ -53,11 +55,8 @@ class EmbodimentStateMachine:
     def transition(self, target: State) -> None:
         if target == self._state:
             return
-        if self._mute_gate is not None:
-            if target == State.MUTED:
-                self._mute_gate.set_muted(True)
-            elif self._state == State.MUTED:
-                self._mute_gate.set_muted(False)
+        # Motion dispatch FIRST. If any driver call raises, _state /
+        # _mute_gate stay unchanged — the transition is atomic on success.
         if target == State.MUTED:
             self._driver.go_to_sleep()
         else:
@@ -66,4 +65,11 @@ class EmbodimentStateMachine:
             move = _STATE_TO_MOVE.get(target)
             if move is not None:
                 self._driver.play_move(move)
+        # Motion succeeded — commit gate + state together. Either both
+        # update or neither does (driver exception above prevents reach).
+        if self._mute_gate is not None:
+            if target == State.MUTED:
+                self._mute_gate.set_muted(True)
+            elif self._state == State.MUTED:
+                self._mute_gate.set_muted(False)
         self._state = target
