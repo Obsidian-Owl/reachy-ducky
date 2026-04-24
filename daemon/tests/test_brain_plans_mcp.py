@@ -287,17 +287,59 @@ def test_read_plan_symlink_escape_rejected(tmp_path: Path) -> None:
         outside_dir.rmdir()
 
 
-def test_read_plan_symlink_to_file_inside_project_allowed(tmp_path: Path) -> None:
-    """A symlink that resolves to a file inside project_root and matches a
-    conventional pattern is allowed (symlink rejection is about escapes, not
-    symlinks in general)."""
-    (tmp_path / "docs" / "plans").mkdir(parents=True)
-    target = tmp_path / "docs" / "plans" / "real.md"
-    target.write_text("real contents")
-    link = tmp_path / "docs" / "plans" / "link.md"
+def test_read_plan_rejects_symlink_to_nonplan_path_even_inside_project(
+    tmp_path: Path,
+) -> None:
+    """Symlinks whose target is a non-plan path inside the project are
+    rejected — closes the 'plan-shaped symlink as general in-project
+    file reader' attack vector (``docs/plans/escape.md ->
+    daemon/src/foo.py`` would have silently leaked source files).
+
+    Symlinks whose target IS a conventional plan path transparently
+    read the target (no security gain for an attacker — same content
+    either way). See ``test_read_plan_symlink_to_plan_target_reads_transparently``.
+    """
+    project = tmp_path / "project"
+    (project / "docs" / "plans").mkdir(parents=True)
+    (project / "daemon" / "src").mkdir(parents=True)
+
+    # Non-plan target inside the project (classic attack vector).
+    target = project / "daemon" / "src" / "foo.py"
+    target.write_text("# definitely not a plan — maybe a secret\n")
+
+    # Plan-shaped symlink pointing at the non-plan target.
+    link = project / "docs" / "plans" / "escape.md"
     link.symlink_to(target)
 
-    assert _read_plan(tmp_path, "docs/plans/link.md") == "real contents"
+    with pytest.raises(PermissionError, match="not a plan"):
+        _read_plan(project, "docs/plans/escape.md")
+
+
+def test_read_plan_symlink_to_plan_target_reads_transparently(
+    tmp_path: Path,
+) -> None:
+    """Symlinks whose target is itself a conventional plan path
+    transparently return the target's content. No security property
+    is violated — the attacker gains nothing they couldn't get by
+    reading the target directly.
+
+    This behavior is consequence of ``_discover`` skipping the symlink
+    itself but adding the target (via its own pattern match) AND
+    ``_read_plan.resolve()`` following the link. Documented so
+    future refactors don't accidentally change it.
+    """
+    project = tmp_path / "project"
+    plans_dir = project / "docs" / "plans"
+    plans_dir.mkdir(parents=True)
+
+    (plans_dir / "real.md").write_text("# Real Plan\nbody\n")
+    (plans_dir / "link.md").symlink_to(plans_dir / "real.md")
+
+    via_real = _read_plan(project, "docs/plans/real.md")
+    via_link = _read_plan(project, "docs/plans/link.md")
+
+    assert "Real Plan" in via_real
+    assert via_real == via_link, "Symlink to plan target should return same content"
 
 
 # ---------------------------------------------------------------------------
@@ -727,10 +769,11 @@ def test_read_plan_rejects_escaped_symlink(tmp_path: Path) -> None:
 
     Two fail-closed gates cover this: ``_read_plan``'s own
     ``relative_to(base)`` check fires first (yielding "escapes project
-    root"), and even if that were ever bypassed, ``_discover``'s new
-    ``is_relative_to`` filter keeps the resolved path out of the
-    membership set. Either way, no ValueError leaks out of
-    ``_read_plan`` and the fail-closed contract is intact.
+    root"), and even if that were ever bypassed, ``_discover``'s
+    ``is_symlink()`` skip keeps the symlink's resolved target out of the
+    membership set (the symlink itself is never admitted at discovery).
+    Either way, no ValueError leaks out of ``_read_plan`` and the
+    fail-closed contract is intact.
     """
     outside = tmp_path / "outside.txt"
     outside.write_text("secret content")

@@ -10,15 +10,17 @@ Exposes two read-only tools over ``create_sdk_mcp_server``:
 
     1. the resolved target path must stay inside the project root (``..``
        traversal and absolute paths are rejected by ``_read_plan``'s own
-       ``is_relative_to`` check; symlink escapes are denied in
-       :func:`_discover`, which silently drops any hit whose ``.resolve()``
-       escapes ``project_root`` at discovery time);
-    2. the target path must be one of the files that :func:`_discover` would
-       advertise (``read_plan`` is not a general-purpose file reader — daemon
-       source and secrets are denied even if they exist). Because
-       ``_discover`` has already filtered symlink escapes, this membership
-       check inherits the property: ``_read_plan`` can only return content
-       for paths ``_discover`` already cleared.
+       ``is_relative_to`` check; external-target symlinks are denied in
+       :func:`_discover`, which silently drops any symlink hit at
+       discovery time so the symlink itself is never admitted);
+    2. the resolved target must be one of the files that :func:`_discover`
+       would advertise (``read_plan`` is not a general-purpose file
+       reader — daemon source and secrets are denied even if they exist).
+       Internal-target symlinks pointing at non-plan paths are rejected
+       here (the non-plan target is not in the set). Internal-target
+       symlinks pointing at a conventional plan transparently follow to
+       the target — same content as reading the target directly; no
+       security gain for an attacker.
 
 The tool surface is intentionally tiny: Claude uses its built-in ``Read`` /
 ``Glob`` / ``Grep`` tools (gated by the PreToolUse security hook) for
@@ -117,25 +119,35 @@ def _discover(base: Path) -> set[Path]:
     not ``base/nested/AGENTS.md``. That anchoring is what makes the read
     surface exactly as wide as the discover surface.
 
-    Symlink-escape filter: a hit whose ``.resolve()`` lands outside ``base`` is
-    silently dropped. The plans MCP tool surface — :func:`list_plans`
-    (discovery) and :func:`_read_plan` (read with membership check) — both
-    read from this set, so neither can return or accept an escape-resolving
-    path. Closed via #8.
+    **Symlinks are skipped at discovery.** A symlink under a conventional
+    plan path is not added to the result set by its own glob match — so
+    a plan-shaped link pointing at a non-plan target (e.g.
+    ``docs/plans/escape.md -> daemon/src/foo.py``) cannot smuggle its
+    target into the membership set. A link pointing at another
+    conventional plan (``docs/plans/link.md -> docs/plans/real.md``) is
+    still readable via :func:`_read_plan` because the target enters the
+    set via its own pattern match and ``_read_plan``'s ``.resolve()``
+    follows the link transparently — that's fine because the attacker
+    gains nothing they couldn't get by reading the target directly.
     """
     results: set[Path] = set()
     for pattern in _CONVENTIONAL_PATTERNS:
         for hit in base.glob(pattern):
             if not hit.is_file():
                 continue
+            if hit.is_symlink():
+                # Skip the symlink hit itself so a plan-shaped link
+                # pointing at a non-plan target (``docs/plans/escape.md
+                # -> daemon/src/foo.py``) cannot smuggle its target into
+                # the membership set via its own glob match. A link to
+                # another conventional plan is still readable because
+                # the target enters the set via its own pattern match
+                # and ``_read_plan``'s ``.resolve()`` follows the link
+                # transparently — same content as reading the target
+                # directly; no security gain for an attacker. See the
+                # module docstring's security invariants.
+                continue
             resolved = hit.resolve()
-            # Reject symlinks whose resolved target escapes ``base``.
-            # ``is_relative_to`` (Python 3.9+) is the non-raising form
-            # of the same check ``_read_plan`` uses. Filtering here
-            # means both ``list_plans`` (discovery) and ``_read_plan``
-            # (membership check) inherit the property for free — no
-            # escaping path can be advertised, read, or leaked via
-            # diagnostic. (#8)
             if not resolved.is_relative_to(base):
                 continue
             results.add(resolved)
@@ -159,11 +171,17 @@ def _read_plan(project_root: Path, rel_path: str) -> str:
 
     Raises:
         PermissionError: if ``rel_path`` resolves outside ``project_root``
-            (``..`` escape, absolute path, symlink escape), or if the
-            resolved path is not one of the files that :func:`_discover`
-            would advertise. The membership check fires regardless of
-            whether the path exists on disk, so probing non-plan locations
-            cannot be used as an existence oracle for arbitrary files.
+            (``..`` escape, absolute path), or if the resolved path is not
+            one of the files that :func:`_discover` would advertise.
+            Because :func:`_discover` skips symlink hits at discovery,
+            a plan-shaped symlink pointing at a non-plan target fails
+            the membership check as "not a plan or spec file"; a
+            plan-shaped symlink pointing at another conventional plan
+            resolves to the target and reads transparently (same content
+            as reading the target directly — no security gain). The
+            membership check fires regardless of whether the path exists
+            on disk, so probing non-plan locations cannot be used as an
+            existence oracle for arbitrary files.
         OSError: subclasses (``FileNotFoundError``, ``PermissionError`` from
             the filesystem, etc.) surface from ``read_text``.
         UnicodeDecodeError: if the file exists and is advertised but isn't
