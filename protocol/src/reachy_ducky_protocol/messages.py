@@ -33,7 +33,6 @@ class UserUtterance(_WireMessage):
 class BrainRequest(_WireMessage):
     user_utterance: str
     project_slug: str | None = None
-    include_tools: list[str] = Field(default_factory=list)
 
 
 class BrainResponse(_WireResponse):
