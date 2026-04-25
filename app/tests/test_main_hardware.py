@@ -33,36 +33,40 @@ async def test_muted_transition_zeros_live_mic() -> None:
     in the offline integration smoke, but against a LIVE ReachyMini
     via the real SDK.
     """
-    mini = reachy_mini.ReachyMini()
-    gate = MuteGate()
-    driver = MockMotionDriver()  # Don't actually care about motion side-effects here.
-    sm = EmbodimentStateMachine(driver, mute_gate=gate)
-    src = ReachyMicSource(mini, mute_gate=gate)
+    # Use the context manager so ``media_manager.close()`` runs on exit —
+    # otherwise the GStreamer/WebRTC pipeline must be torn down by GC at
+    # interpreter shutdown, which deadlocks on a tokio mutex inside
+    # libgstrswebrtc and hangs pytest indefinitely.
+    with reachy_mini.ReachyMini() as mini:
+        gate = MuteGate()
+        driver = MockMotionDriver()  # Don't actually care about motion side-effects here.
+        sm = EmbodimentStateMachine(driver, mute_gate=gate)
+        src = ReachyMicSource(mini, mute_gate=gate)
 
-    # Pull a few frames pre-mute; just confirm the pipeline is alive.
-    frames_before: list[AudioFrame] = []
+        # Pull a few frames pre-mute; just confirm the pipeline is alive.
+        frames_before: list[AudioFrame] = []
 
-    async def drain_pre() -> None:
-        with contextlib.suppress(asyncio.CancelledError):
-            async for frame in src.frames():
-                frames_before.append(frame)
-                if len(frames_before) >= 2:
-                    return
+        async def drain_pre() -> None:
+            with contextlib.suppress(asyncio.CancelledError):
+                async for frame in src.frames():
+                    frames_before.append(frame)
+                    if len(frames_before) >= 2:
+                        return
 
-    await asyncio.wait_for(drain_pre(), timeout=5.0)
+        await asyncio.wait_for(drain_pre(), timeout=5.0)
 
-    # Transition to MUTED; subsequent frames must be all zeros.
-    sm.transition(State.MUTED)
-    frames_after: list[AudioFrame] = []
+        # Transition to MUTED; subsequent frames must be all zeros.
+        sm.transition(State.MUTED)
+        frames_after: list[AudioFrame] = []
 
-    async def drain_post() -> None:
-        with contextlib.suppress(asyncio.CancelledError):
-            async for frame in src.frames():
-                frames_after.append(frame)
-                if len(frames_after) >= 2:
-                    return
+        async def drain_post() -> None:
+            with contextlib.suppress(asyncio.CancelledError):
+                async for frame in src.frames():
+                    frames_after.append(frame)
+                    if len(frames_after) >= 2:
+                        return
 
-    await asyncio.wait_for(drain_post(), timeout=5.0)
+        await asyncio.wait_for(drain_post(), timeout=5.0)
 
-    for _sr, samples in frames_after:
-        assert np.all(samples == 0), "live-hardware muted frame had signal"
+        for _sr, samples in frames_after:
+            assert np.all(samples == 0), "live-hardware muted frame had signal"

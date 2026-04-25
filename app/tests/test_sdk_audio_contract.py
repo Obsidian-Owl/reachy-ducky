@@ -112,13 +112,17 @@ def test_get_audio_sample_returns_non_empty_stereo_buffer() -> None:
     explicitly so a shape change surfaces here before the adapter
     silently produces corrupted audio at the channel-pick step.
     """
-    mini = ReachyMini()
-    deadline = time.monotonic() + 2.0
-    sample: np.ndarray | None = None
-    while time.monotonic() < deadline:
-        sample = mini.media.get_audio_sample()
-        if sample is not None and sample.size > 0:
-            break
+    # Use the context manager so ``media_manager.close()`` runs on exit —
+    # otherwise the GStreamer/WebRTC pipeline must be torn down by GC at
+    # interpreter shutdown, which deadlocks on a tokio mutex inside
+    # libgstrswebrtc and hangs pytest indefinitely.
+    with ReachyMini() as mini:
+        deadline = time.monotonic() + 2.0
+        sample: np.ndarray | None = None
+        while time.monotonic() < deadline:
+            sample = mini.media.get_audio_sample()
+            if sample is not None and sample.size > 0:
+                break
     assert sample is not None, "get_audio_sample kept returning None for 2s — mic not primed?"
     assert sample.size > 0, f"get_audio_sample yielded empty array ({sample!r})"
     assert sample.dtype == np.float32, f"expected float32 per SDK contract, got {sample.dtype}"
@@ -140,17 +144,39 @@ def test_push_audio_sample_accepts_silent_frame(
     float32↔PCM16 conversion at the Reachy adapter boundary.
 
     We assert not only that the call doesn't raise but also that it
-    emits no warning — the SDK silently logs a warning and returns on
-    wrong-shape input (media_manager.py:343-347), so a no-op silently
-    passing "must not raise" would be the accomplishment-simulator
-    anti-pattern ``testing-standards.md`` warns against.
+    emits no warning *from the media_manager logger* — the SDK
+    silently logs a warning and returns on wrong-shape input
+    (media_manager.py:340 "Audio system is not initialized" and
+    media_manager.py:344 "must have at most 2 dimensions"), so a no-op
+    silently passing "must not raise" would be the
+    accomplishment-simulator anti-pattern ``testing-standards.md``
+    warns against.
+
+    We filter on logger name because ``ReachyMini()`` construction
+    eagerly initializes the DOA mic-array (``audio_doa.py:46``), which
+    logs an ERROR at ``reachy_mini.media.audio_control_utils`` if the
+    USB-control device isn't enumerated. That path is orthogonal to
+    ``push_audio_sample`` — audio I/O routes through the GStreamer
+    backend regardless of whether USB-direct ReSpeaker control is
+    available.
     """
-    mini = ReachyMini()
-    # 40ms @ 24 kHz mono float32 = 960 samples.
-    silent = np.zeros(960, dtype=np.float32)
-    with caplog.at_level(logging.WARNING, logger="reachy_mini.media.media_manager"):
+    # Use the context manager so ``media_manager.close()`` runs on exit —
+    # otherwise the GStreamer/WebRTC pipeline must be torn down by GC at
+    # interpreter shutdown, which deadlocks on a tokio mutex inside
+    # libgstrswebrtc and hangs pytest indefinitely.
+    media_manager_logger = "reachy_mini.media.media_manager"
+    with ReachyMini() as mini, caplog.at_level(logging.WARNING, logger=media_manager_logger):
+        # 40ms @ 24 kHz mono float32 = 960 samples.
+        silent = np.zeros(960, dtype=np.float32)
         mini.media.push_audio_sample(silent)
-    assert not caplog.records, (
-        f"push_audio_sample logged warnings (data dropped silently): "
-        f"{[r.getMessage() for r in caplog.records]}"
+    # Filter on logger name AND level. ReachyMini construction emits INFO
+    # records on the media_manager logger ("Using WebRTC streaming backend.")
+    # that we don't care about — the silent-drop antipatterns we're guarding
+    # against are both at WARNING (media_manager.py:340 / :344).
+    relevant = [
+        r for r in caplog.records if r.name == media_manager_logger and r.levelno >= logging.WARNING
+    ]
+    assert not relevant, (
+        f"push_audio_sample logged warnings from media_manager (data dropped silently): "
+        f"{[r.getMessage() for r in relevant]}"
     )
