@@ -58,6 +58,13 @@ def test_wake_detector_abc_requires_feed_and_reset() -> None:
     assert "reset" in abstract_methods
 
 
+def test_mock_default_feed_does_not_set_event() -> None:
+    """Default MockWakeDetector (trigger_on_feed=False) is a no-op on feed."""
+    detector = MockWakeDetector()
+    detector.feed((24_000, np.zeros(960, dtype=np.int16)))
+    assert not detector.event.is_set()
+
+
 def test_mock_feed_with_trigger_on_feed_sets_event_and_buffers_nothing() -> None:
     detector = MockWakeDetector(trigger_on_feed=True)
     silent_frame: AudioFrame = (24_000, np.zeros(960, dtype=np.int16))
