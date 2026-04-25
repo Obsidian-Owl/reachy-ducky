@@ -109,12 +109,12 @@ jobs:
           curl -sSL \
             "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_windows_x64.zip" \
             -o gitleaks.zip
-          # Use ``tar -xf`` (which handles zip on modern Windows since
-          # Win10 1803 ships native bsdtar) rather than ``unzip``: unzip
-          # isn't formally guaranteed in the Git Bash environment on
-          # ``windows-latest``, while tar is. Cleanest cross-shell.
+          # ``unzip`` ships in Git Bash on the ``windows-latest`` runner
+          # image, which is what ``shell: bash`` resolves to. (Switching
+          # to ``tar -xf`` was attempted earlier — Git Bash ships GNU
+          # tar, not bsdtar, and GNU tar can't read zip files.)
           mkdir -p "$RUNNER_TEMP/gitleaks"
-          tar -xf gitleaks.zip -C "$RUNNER_TEMP/gitleaks"
+          unzip -o gitleaks.zip -d "$RUNNER_TEMP/gitleaks"
           echo "$RUNNER_TEMP/gitleaks" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/gitleaks/gitleaks.exe" version
 
