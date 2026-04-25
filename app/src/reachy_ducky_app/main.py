@@ -21,16 +21,19 @@ which are called by the on-robot daemon and never at import time.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
+
+from reachy_ducky_protocol.messages import State
 
 from .conversation import run_one_turn
 from .daemon_client import DaemonClient
 from .embodiment.motion_driver import ReachyMotionDriver
 from .embodiment.state_machine import EmbodimentStateMachine
 from .mute import MuteGate
-from .voice.audio_io import load_default_mic_source, load_default_speaker_sink
+from .voice.audio_io import MicSource, load_default_mic_source, load_default_speaker_sink
 from .voice.openai_realtime import OpenAIRealtimeVoice
-from .wake import load_default_wake_detector
+from .wake import WakeDetector, load_default_wake_detector
 
 # How often the stop-bridge checks ``threading.Event.is_set()``. This is a
 # memory-load poll only — the wake path itself awaits ``wake.event`` via
@@ -83,8 +86,15 @@ class ReachyDuckyApp:
         # invariant breaks.
         mute_gate = MuteGate()
         sm = EmbodimentStateMachine(driver=driver, mute_gate=mute_gate)
+        # Hoist mic out of voice construction so the wake pump (Phase 1)
+        # and the voice turn (Phase 2) can share a single mic instance
+        # without OpenAIRealtimeVoice having to expose a public accessor.
+        # Pattern C requires that exactly one consumer pull frames at a
+        # time; sharing the instance here keeps that invariant local to
+        # this loop body.
+        mic = load_default_mic_source(reachy_mini=reachy_mini, mute_gate=mute_gate)
         voice = OpenAIRealtimeVoice(
-            mic=load_default_mic_source(reachy_mini=reachy_mini, mute_gate=mute_gate),
+            mic=mic,
             speaker=load_default_speaker_sink(reachy_mini=reachy_mini),
         )
         daemon = DaemonClient.from_env()
@@ -93,29 +103,40 @@ class ReachyDuckyApp:
         stop_checker = asyncio.create_task(_watch_stop(stop_event))
         try:
             while not stop_event.is_set():
+                # Phase 1 — wake-listening. Wake pump owns the mic.
+                wake.reset()
+                pump_task = asyncio.create_task(_run_wake_pump(mic, wake))
                 wake_waiter = asyncio.create_task(wake.event.wait())
                 try:
                     await asyncio.wait(
-                        {wake_waiter, stop_checker},
+                        {pump_task, stop_checker, wake_waiter},
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                 finally:
-                    # Cancel AND drain the waiter when it's still pending.
-                    # ``cancel()`` alone only marks the task; dropping the
-                    # reference before it observes the cancellation emits
-                    # "Task was destroyed but it is pending" warnings and
-                    # leaves un-retrieved ``CancelledError`` on the event
-                    # loop. Awaiting with suppression is the canonical
-                    # asyncio pattern for one-shot cancel + cleanup.
+                    if not pump_task.done():
+                        pump_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await pump_task
                     if not wake_waiter.done():
                         wake_waiter.cancel()
-                        try:
+                        with contextlib.suppress(asyncio.CancelledError):
                             await wake_waiter
-                        except asyncio.CancelledError:
-                            pass
                 if stop_event.is_set():
                     break
+                # Only enter Phase 2 if wake actually fired. The pump task
+                # can also complete because the mic iterator ended (e.g.
+                # ``MockMicSource`` yields nothing); in that case we loop
+                # back to Phase 1 without firing a turn. ``ReachyMicSource``
+                # never returns naturally, so on hardware the pump only
+                # exits via wake-fire or cancellation.
+                if not wake.event.is_set():
+                    continue
                 wake.event.clear()
+
+                # Phase 2 — turn. Wake confirmed; transition the embodiment
+                # state so the human gets the "I heard you" affordance, then
+                # let voice take exclusive mic ownership for the turn.
+                sm.transition(State.LISTENING)
                 await run_one_turn(voice=voice, sm=sm, daemon=daemon, project_slug=None)
         finally:
             stop_checker.cancel()
@@ -134,6 +155,24 @@ class ReachyDuckyApp:
         ``wake.event`` only, so the default ``False`` body is harmless.
         """
         return False
+
+
+async def _run_wake_pump(mic: MicSource, wake: WakeDetector) -> None:
+    """Pull frames from the mic and feed the wake detector until cancelled.
+
+    Cancellation is the normal exit path — caller cancels this task once
+    ``wake.event`` fires (or stop is requested). The detector signals
+    detection by setting its event; the caller observes via the event,
+    not via this coroutine's return value.
+
+    Pattern C invariant: this coroutine is the only mic consumer during
+    Phase 1. ``run_one_turn`` consumes the mic during Phase 2, after this
+    task has been cancelled and awaited.
+    """
+    async for frame in mic.frames():
+        wake.feed(frame)
+        if wake.event.is_set():
+            return
 
 
 async def _watch_stop(stop_event: threading.Event) -> None:

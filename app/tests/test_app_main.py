@@ -12,12 +12,21 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
+from reachy_ducky_app.embodiment import MockMotionDriver
 from reachy_ducky_app.main import ReachyDuckyApp, main
 from reachy_ducky_app.mute import MuteGate
-from reachy_ducky_app.voice.audio_io import MicSource, MockMicSource, MockSpeakerSink, SpeakerSink
+from reachy_ducky_app.voice.audio_io import (
+    AudioFrame,
+    MicSource,
+    MockMicSource,
+    MockSpeakerSink,
+    SpeakerSink,
+)
 from reachy_ducky_app.wake import MockWakeDetector
 
 
@@ -87,6 +96,18 @@ async def test_wake_event_drives_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "reachy_ducky_app.main.load_default_wake_detector",
         lambda: injected_wake,
+    )
+    # Pattern C: the wake pump pulls from the mic and the LISTENING
+    # transition drives the motion driver. Use the silent MockMicSource
+    # and the no-op MockMotionDriver so we exercise main()'s wiring
+    # without standing up the real Reachy media stack.
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_mic_source",
+        lambda **_: MockMicSource(),
+    )
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.ReachyMotionDriver",
+        lambda _reachy_mini: MockMotionDriver(),
     )
 
     async def _fire_wake_soon() -> None:
@@ -173,6 +194,13 @@ async def test_wake_loop_exits_cleanly_without_firing(
     monkeypatch.setattr(
         "reachy_ducky_app.main.load_default_wake_detector",
         lambda: injected_wake,
+    )
+    # Pattern C: wake pump consumes mic frames during Phase 1. Inject the
+    # silent MockMicSource so this test (which never fires a wake event)
+    # doesn't touch the real Reachy media stack.
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_mic_source",
+        lambda **_: MockMicSource(),
     )
 
     stop = threading.Event()
@@ -320,9 +348,9 @@ async def test_run_async_closes_daemon_client_even_when_turn_raises(
     """If ``run_one_turn`` raises, ``daemon.aclose()`` must still be awaited.
 
     Guards that the ``try/finally`` wraps the whole wake loop, so the
-    pool is drained on crash as well as clean shutdown. Drives the loop
-    via a pre-set ``wake.event`` so the first ``asyncio.wait`` immediately
-    selects the wake branch.
+    pool is drained on crash as well as clean shutdown. Drives a turn
+    via a wake detector that fires on the first ``feed`` call so the
+    pump immediately yields to Phase 2.
     """
     monkeypatch.setenv("OPENAI_API_KEY", "test")
 
@@ -341,11 +369,26 @@ async def test_run_async_closes_daemon_client_even_when_turn_raises(
 
     monkeypatch.setattr("reachy_ducky_app.main.run_one_turn", _blowing_up)
 
-    injected_wake = MockWakeDetector()
-    injected_wake.event.set()
+    # ``trigger_on_feed=True`` makes the detector fire on the first
+    # ``feed`` call, which the wake pump will issue as soon as the mic
+    # yields a frame. Avoids racing the pre-set-then-reset() pattern.
+    injected_wake = MockWakeDetector(trigger_on_feed=True)
     monkeypatch.setattr(
         "reachy_ducky_app.main.load_default_wake_detector",
         lambda: injected_wake,
+    )
+
+    class _OneFrameMic(MockMicSource):
+        async def frames(self) -> AsyncIterator[AudioFrame]:
+            yield (24_000, np.zeros(960, dtype=np.int16))
+
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_mic_source",
+        lambda **_: _OneFrameMic(),
+    )
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.ReachyMotionDriver",
+        lambda _reachy_mini: MockMotionDriver(),
     )
 
     stop = threading.Event()
