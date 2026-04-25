@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -63,6 +63,15 @@ jobs:
         # lazy-import contract that a fake-rumps unit test can't see).
         run: uv sync --all-packages --group dev --extra macos
 
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        # Same pattern as Linux: no `macos` extra (rumps is macOS-only).
+        # menubar's tests run on Windows via a ``rumps`` stub injected
+        # by ``menubar/tests/conftest.py`` on platforms where the real
+        # package isn't installed; menubar's base deps install fine
+        # cross-platform.
+        run: uv sync --all-packages --group dev
+
       - name: Install gitleaks (Linux)
         # The daemon's specialists pipe every prompt through ``gitleaks stdin``
         # before ``brain.query()`` (pre-brain secret redaction, design doc §10 /
@@ -88,6 +97,27 @@ jobs:
           brew install gitleaks
           gitleaks version
 
+      - name: Install gitleaks (Windows)
+        if: runner.os == 'Windows'
+        # Mirror the Linux tarball install — gitleaks ships Windows
+        # binaries on the same release page. Pinned for reproducibility;
+        # bump intentionally via a separate commit. Match the version
+        # used in the Linux step.
+        shell: bash
+        run: |
+          VERSION=8.30.1
+          curl -sSL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_windows_x64.zip" \
+            -o gitleaks.zip
+          # ``unzip`` ships in Git Bash on the ``windows-latest`` runner
+          # image, which is what ``shell: bash`` resolves to. (Switching
+          # to ``tar -xf`` was attempted earlier — Git Bash ships GNU
+          # tar, not bsdtar, and GNU tar can't read zip files.)
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          unzip -o gitleaks.zip -d "$RUNNER_TEMP/gitleaks"
+          echo "$RUNNER_TEMP/gitleaks" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/gitleaks/gitleaks.exe" version
+
       - name: Ruff lint
         run: uv run ruff check .
 
@@ -106,11 +136,25 @@ jobs:
       - name: Bandit (security)
         run: uv run bandit -ll -r daemon/src app/src menubar/src protocol/src
 
-      - name: Pytest (unit tier) with coverage
+      - name: Pytest (unit tier) with coverage (Linux + macOS)
+        if: runner.os != 'Windows'
         # Coverage floor + report formats: `term-missing` for the job log;
         # `xml` for future upload to Codecov / artifact inspection. The
         # `fail_under` threshold lives in pyproject.toml's
         # [tool.coverage.report] so the same floor applies locally.
         run: uv run pytest -q --cov --cov-report=term-missing --cov-report=xml
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+
+      - name: Pytest (unit tier) with coverage (Windows — informational only)
+        if: runner.os == 'Windows'
+        # Windows is the informational tier of the CI matrix per Phase 3 of
+        # the canonical-dep-migration plan: it catches install-story breaks
+        # but coverage gating lives on Linux + macOS. menubar tests now run
+        # on Windows too (via the rumps stub injected by
+        # ``menubar/tests/conftest.py``), but the coverage floor stays on
+        # the required Linux + macOS jobs. ``--cov-fail-under=0`` overrides
+        # the pyproject.toml threshold.
+        run: uv run pytest -q --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=0
         env:
           PYTHONDONTWRITEBYTECODE: "1"

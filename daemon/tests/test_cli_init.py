@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import stat
 import subprocess
+import sys
 import tomllib
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -638,9 +639,13 @@ def test_pat_writes_env_with_0600(
     # TOML never contains the PAT.
     cfg_text = (home / ".reachy-ducky" / "config.toml").read_text()
     assert pat not in cfg_text
-    # 0600 perms.
-    mode = stat.S_IMODE(env.stat().st_mode)
-    assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+    # 0600 perms — POSIX-only contract. Windows uses NTFS ACLs rather
+    # than POSIX modes, so ``os.chmod(path, 0o600)`` is largely a no-op
+    # there and ``stat().st_mode`` returns the NTFS default (0o666). The
+    # file-existence + content checks above still run on every platform.
+    if sys.platform != "win32":
+        mode = stat.S_IMODE(env.stat().st_mode)
+        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
 
 
 def test_auth_token_writes_env_with_0600(
@@ -676,8 +681,11 @@ def test_auth_token_writes_env_with_0600(
     # The token is NOT written to config.toml.
     cfg_text = (home / ".reachy-ducky" / "config.toml").read_text()
     assert token not in cfg_text
-    mode = stat.S_IMODE(env.stat().st_mode)
-    assert mode == 0o600
+    # POSIX-only: NTFS enforces secrecy via ACLs, not POSIX modes. See
+    # the matching guard in ``test_pat_writes_env_with_0600``.
+    if sys.platform != "win32":
+        mode = stat.S_IMODE(env.stat().st_mode)
+        assert mode == 0o600
 
 
 def test_no_pat_no_auth_token_no_env_file(
