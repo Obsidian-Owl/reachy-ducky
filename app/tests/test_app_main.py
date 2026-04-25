@@ -43,6 +43,7 @@ async def test_run_async_exits_immediately_when_stop_event_set(
 ) -> None:
     """Pre-set stop_event: ``_run_async`` must return without running any turn."""
     monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("REACHY_DUCKY_WAKE_MOCK", "1")
 
     run_one_turn_calls: list[object] = []
 
@@ -198,6 +199,7 @@ async def test_wake_loop_exits_cleanly_without_firing(
 def test_main_exits_with_stopped_event(monkeypatch: pytest.MonkeyPatch) -> None:
     """``main()`` pre-sets the stop event and returns cleanly (no hang)."""
     monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("REACHY_DUCKY_WAKE_MOCK", "1")
     # If main() hangs, pytest's per-test timeout (or CI watchdog) will catch
     # it; belt-and-braces, the stop_event.set() inside main() guarantees the
     # loop body is skipped, so this returns synchronously.
@@ -215,6 +217,7 @@ async def test_run_async_closes_daemon_client_on_shutdown(
     stop the event, and assert ``aclose`` was awaited exactly once.
     """
     monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("REACHY_DUCKY_WAKE_MOCK", "1")
 
     fake_daemon = MagicMock()
     fake_daemon.aclose = AsyncMock()
@@ -252,6 +255,7 @@ async def test_run_async_constructs_voice_with_default_mic_and_speaker(
     shouldn't be silenced when the user mutes.
     """
     monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("REACHY_DUCKY_WAKE_MOCK", "1")
 
     mic_factory_kwargs: list[dict[str, object]] = []
     speaker_factory_kwargs: list[dict[str, object]] = []
