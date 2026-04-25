@@ -220,10 +220,12 @@ Add the `AudioFrame` import:
 from reachy_ducky_app.voice.audio_io import AudioFrame
 ```
 
+**Also delete the obsolete `test_load_default_returns_mock_for_now` test** at `app/tests/test_wake.py:75-78`. That test pins the Phase A "factory always returns mock" contract, which #55 explicitly inverts (real detector by default; mock only via env override). Without this deletion, Step 4's per-task gate fails on `ModuleNotFoundError: ... wake_onnx` because the factory's new default path imports a module that Task 4 hasn't created yet. The new env-override behaviour is pinned by `test_load_default_returns_mock_with_env_override`, which Task 4 adds.
+
 **Step 2: Run — confirm fail**
 
 Run: `uv run pytest app/tests/test_wake.py -v`
-Expected: 3 failures with `AttributeError: ... has no attribute 'feed'` (and `reset`).
+Expected: 3 failures with `AttributeError: ... has no attribute 'feed'` (and `reset`). The obsolete factory test was deleted in Step 1, so it does not appear in this run.
 
 **Step 3: Reshape the ABC**
 
@@ -718,17 +720,25 @@ async def test_wake_pump_fires_then_yields_to_turn_then_restarts(
     )()
     monkeypatch.setattr("reachy_ducky_app.main.DaemonClient", type(fake_daemon))
 
-    feed_calls_during_turn: list[int] = []
+    # Snapshot wake.feed_calls at the START and END of each fake turn.
+    # The invariant is that these are EQUAL — wake.feed must not run
+    # during run_one_turn (Phase 2 == voice owns the mic exclusively).
+    turn_feed_call_pairs: list[tuple[int, int]] = []
 
     async def _fake_run_one_turn(**_: Any) -> None:
-        feed_calls_during_turn.append(wake.feed_calls)
+        start_calls = wake.feed_calls
+        # Yield once so the wake pump task (if it were buggily still
+        # alive) would have a chance to run. Without this await, a stale
+        # pump task wouldn't get scheduling time and the assertion below
+        # would pass even on a real bug.
+        await asyncio.sleep(0)
+        end_calls = wake.feed_calls
+        turn_feed_call_pairs.append((start_calls, end_calls))
         fake_voice_calls.append("turn")
 
     monkeypatch.setattr("reachy_ducky_app.main.run_one_turn", _fake_run_one_turn)
 
     # Capture state machine transitions
-    real_init = EmbodimentStateMachine.__init__
-
     def _capture_transition(self: Any, target: State) -> None:
         sm_transitions.append(target)
 
@@ -751,10 +761,12 @@ async def test_wake_pump_fires_then_yields_to_turn_then_restarts(
     assert len(fake_voice_calls) >= 2, "expected at least 2 turns"
     assert mic.entry_count >= 2, "mic.frames() should be re-entered each phase 1"
     assert wake.reset_calls >= 2, "wake.reset() called once per phase 1 entry"
-    # Wake.feed must NOT be called during run_one_turn
-    for snapshot, total in zip(feed_calls_during_turn, feed_calls_during_turn[1:], strict=False):
-        # Not strictly stronger than the structural assertion below; kept for clarity.
-        assert total >= snapshot
+    # Wake.feed must NOT be called during run_one_turn — start == end per turn.
+    for start_calls, end_calls in turn_feed_call_pairs:
+        assert start_calls == end_calls, (
+            f"wake.feed ran during run_one_turn (start={start_calls}, end={end_calls}) "
+            "— Pattern C invariant violated"
+        )
     # State.LISTENING transition fires once per wake hit
     assert sm_transitions.count(State.LISTENING) >= 2
 ```
@@ -1035,7 +1047,7 @@ Implements the design from `docs/plans/2026-04-25-onnx-wake-detector-design.md` 
 - Vendored ~10 MB of openWakeWord weights at `app/src/reachy_ducky_app/assets/wake/` (Apache 2.0). Stand-in keyword `hey jarvis`; custom "hey ducky" tracked in #75.
 - Pattern C lifecycle handoff in `main._run_async`: wake pump owns the mic during Phase 1; voice owns it during Phase 2; never both.
 - Wake-fire transitions to `State.LISTENING` for the human-in-the-loop "I heard you" affordance.
-- New `OPENWAKEWORD_DUCKY_WAKE_MOCK=1` env override returns `MockWakeDetector` for unit tests / dev machines without the vendored model.
+- New `REACHY_DUCKY_WAKE_MOCK=1` env override returns `MockWakeDetector` for unit tests / dev machines without the vendored model.
 
 ## Test plan
 
