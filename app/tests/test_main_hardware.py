@@ -10,7 +10,6 @@ when the user is back on LAN.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 
 import numpy as np
 import pytest
@@ -44,29 +43,37 @@ async def test_muted_transition_zeros_live_mic() -> None:
         src = ReachyMicSource(mini, mute_gate=gate)
 
         # Pull a few frames pre-mute; just confirm the pipeline is alive.
+        # Don't suppress CancelledError — wait_for delivers the timeout via
+        # cancellation, and swallowing it would convert a "no frames in 5s"
+        # timeout into a silent successful return. Length asserts after
+        # each drain pin the actual frame count regardless.
         frames_before: list[AudioFrame] = []
 
         async def drain_pre() -> None:
-            with contextlib.suppress(asyncio.CancelledError):
-                async for frame in src.frames():
-                    frames_before.append(frame)
-                    if len(frames_before) >= 2:
-                        return
+            async for frame in src.frames():
+                frames_before.append(frame)
+                if len(frames_before) >= 2:
+                    return
 
         await asyncio.wait_for(drain_pre(), timeout=5.0)
+        assert len(frames_before) >= 2, (
+            f"expected at least 2 pre-mute frames in 5s, got {len(frames_before)}"
+        )
 
         # Transition to MUTED; subsequent frames must be all zeros.
         sm.transition(State.MUTED)
         frames_after: list[AudioFrame] = []
 
         async def drain_post() -> None:
-            with contextlib.suppress(asyncio.CancelledError):
-                async for frame in src.frames():
-                    frames_after.append(frame)
-                    if len(frames_after) >= 2:
-                        return
+            async for frame in src.frames():
+                frames_after.append(frame)
+                if len(frames_after) >= 2:
+                    return
 
         await asyncio.wait_for(drain_post(), timeout=5.0)
+        assert len(frames_after) >= 2, (
+            f"expected at least 2 post-mute frames in 5s, got {len(frames_after)}"
+        )
 
         for _sr, samples in frames_after:
             assert np.all(samples == 0), "live-hardware muted frame had signal"
