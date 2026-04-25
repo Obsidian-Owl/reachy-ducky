@@ -66,9 +66,10 @@ jobs:
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         # Same pattern as Linux: no `macos` extra (rumps is macOS-only).
-        # menubar's *tests* are skipped on Windows via
-        # `menubar/tests/conftest.py`'s ``pytest.importorskip("rumps")``;
-        # menubar's base deps install fine cross-platform.
+        # menubar's tests run on Windows via a ``rumps`` stub injected
+        # by ``menubar/tests/conftest.py`` on platforms where the real
+        # package isn't installed; menubar's base deps install fine
+        # cross-platform.
         run: uv sync --all-packages --group dev
 
       - name: Install gitleaks (Linux)
@@ -108,7 +109,12 @@ jobs:
           curl -sSL \
             "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_windows_x64.zip" \
             -o gitleaks.zip
-          unzip -o gitleaks.zip -d "$RUNNER_TEMP/gitleaks"
+          # Use ``tar -xf`` (which handles zip on modern Windows since
+          # Win10 1803 ships native bsdtar) rather than ``unzip``: unzip
+          # isn't formally guaranteed in the Git Bash environment on
+          # ``windows-latest``, while tar is. Cleanest cross-shell.
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          tar -xf gitleaks.zip -C "$RUNNER_TEMP/gitleaks"
           echo "$RUNNER_TEMP/gitleaks" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/gitleaks/gitleaks.exe" version
 
@@ -144,9 +150,11 @@ jobs:
         if: runner.os == 'Windows'
         # Windows is the informational tier of the CI matrix per Phase 3 of
         # the canonical-dep-migration plan: it catches install-story breaks
-        # but coverage gating lives on Linux + macOS where the menubar tests
-        # (skipped on Windows because rumps is macOS-only) actually run.
-        # ``--cov-fail-under=0`` overrides the pyproject.toml threshold.
+        # but coverage gating lives on Linux + macOS. menubar tests now run
+        # on Windows too (via the rumps stub injected by
+        # ``menubar/tests/conftest.py``), but the coverage floor stays on
+        # the required Linux + macOS jobs. ``--cov-fail-under=0`` overrides
+        # the pyproject.toml threshold.
         run: uv run pytest -q --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=0
         env:
           PYTHONDONTWRITEBYTECODE: "1"
