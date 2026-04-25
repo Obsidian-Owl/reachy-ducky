@@ -100,13 +100,7 @@ def load_default_wake_detector() -> WakeDetector:
 
     if os.environ.get("REACHY_DUCKY_WAKE_MOCK") == "1":
         return MockWakeDetector()
-    # OpenWakeWordDetector ships in Task 4 of #55; this branch exists so
-    # Task 3 can be committed independently with a passing test suite.
-    # Until Task 4 lands the import will fail loudly. The type: ignore
-    # is intentional and removed by Task 4 when wake_onnx materialises.
-    from reachy_ducky_app.wake_onnx import (  # type: ignore[import-not-found]  # noqa: PLC0415
-        OpenWakeWordDetector,
-    )
+    from reachy_ducky_app.wake_onnx import OpenWakeWordDetector  # noqa: PLC0415
 
     detector: WakeDetector = OpenWakeWordDetector.from_vendored_weights()
     return detector

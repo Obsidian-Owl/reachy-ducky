@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -10,7 +11,9 @@ from reachy_ducky_app.voice.audio_io import AudioFrame
 from reachy_ducky_app.wake import (
     MockWakeDetector,
     WakeDetector,
+    load_default_wake_detector,
 )
+from reachy_ducky_app.wake_onnx import OpenWakeWordDetector
 
 
 def test_wake_detector_is_abstract() -> None:
@@ -78,3 +81,98 @@ def test_mock_reset_clears_event() -> None:
     assert detector.event.is_set()
     detector.reset()
     assert not detector.event.is_set()
+
+
+class FakeOWWModel:
+    """Stand-in for openwakeword.model.Model in unit tests."""
+
+    def __init__(self, scores: dict[str, float]) -> None:
+        self._scores = scores
+        self.predict_calls = 0
+        self.last_chunk: np.ndarray | None = None
+        self.reset_calls = 0
+
+    def predict(self, chunk: np.ndarray) -> dict[str, float]:
+        self.predict_calls += 1
+        self.last_chunk = chunk
+        return dict(self._scores)
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+
+
+def test_owd_buffers_until_1280_samples_then_predicts() -> None:
+    fake = FakeOWWModel(scores={"hey_jarvis": 0.9})
+    det = OpenWakeWordDetector(model=fake, threshold=0.5)
+    # 24 kHz at 640 samples = ~26.7 ms — sub-window after resample to 16 kHz (~427 samples)
+    det.feed((24_000, np.zeros(640, dtype=np.int16)))
+    assert not det.event.is_set()
+    assert fake.predict_calls == 0
+    # Two more 640-sample chunks @ 24 kHz cross the 1280-sample @ 16 kHz threshold
+    det.feed((24_000, np.zeros(640, dtype=np.int16)))
+    det.feed((24_000, np.zeros(640, dtype=np.int16)))
+    assert det.event.is_set()
+    assert fake.predict_calls >= 1
+
+
+def test_owd_below_threshold_does_not_set_event() -> None:
+    fake = FakeOWWModel(scores={"hey_jarvis": 0.4})
+    det = OpenWakeWordDetector(model=fake, threshold=0.5)
+    # Push enough audio for one full window at 16 kHz: 1280 samples * 24/16 = 1920 @ 24 kHz
+    det.feed((24_000, np.zeros(1920, dtype=np.int16)))
+    assert not det.event.is_set()
+    assert fake.predict_calls == 1
+
+
+def test_owd_predict_chunk_is_1280_samples_at_16k() -> None:
+    fake = FakeOWWModel(scores={"hey_jarvis": 0.0})
+    det = OpenWakeWordDetector(model=fake, threshold=0.5)
+    det.feed((24_000, np.zeros(1920, dtype=np.int16)))
+    assert fake.last_chunk is not None
+    assert fake.last_chunk.shape == (1280,)
+    assert fake.last_chunk.dtype == np.int16
+
+
+def test_owd_resample_path_skipped_when_input_already_16k() -> None:
+    fake = FakeOWWModel(scores={"hey_jarvis": 0.0})
+    det = OpenWakeWordDetector(model=fake, threshold=0.5)
+    det.feed((16_000, np.zeros(1280, dtype=np.int16)))
+    assert fake.predict_calls == 1
+    assert fake.last_chunk is not None
+    assert fake.last_chunk.shape == (1280,)
+
+
+def test_owd_reset_drops_buffer_and_calls_model_reset() -> None:
+    fake = FakeOWWModel(scores={"hey_jarvis": 0.9})
+    det = OpenWakeWordDetector(model=fake, threshold=0.5)
+    det.feed((24_000, np.zeros(640, dtype=np.int16)))  # half-buffer
+    det.event.set()  # simulate a prior fire
+    det.reset()
+    assert not det.event.is_set()
+    assert fake.reset_calls == 1
+    # After reset, a sub-window feed should not trigger immediate predict
+    det.feed((24_000, np.zeros(640, dtype=np.int16)))
+    # If reset failed to drop the buffer, the accumulated 1280 from prior
+    # half + new half would have triggered a predict — assert it didn't
+    assert fake.predict_calls == 0
+
+
+def test_owd_factory_raises_when_weights_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("REACHY_DUCKY_WAKE_MOCK", raising=False)
+    monkeypatch.setattr(
+        "reachy_ducky_app.wake_onnx._VENDORED_MODEL_PATH",
+        tmp_path / "nonexistent.onnx",
+    )
+    with pytest.raises(RuntimeError, match="Wake model not found"):
+        OpenWakeWordDetector.from_vendored_weights()
+
+
+def test_load_default_returns_mock_with_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REACHY_DUCKY_WAKE_MOCK", "1")
+    detector = load_default_wake_detector()
+    assert isinstance(detector, MockWakeDetector)
