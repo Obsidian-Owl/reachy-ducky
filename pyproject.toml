@@ -22,9 +22,26 @@ members = ["daemon", "app", "menubar", "protocol"]
 # future ``reachy-mini`` upgrade resurfaces the same bug on
 # ``gstreamer-bundle`` or another sibling, add entries rather than
 # widen this one.
+#
+# ``openwakeword`` hard-depends on ``tflite-runtime`` for Linux installs,
+# but tflite-runtime publishes no wheels for cp312+ — so the universal
+# resolution fails even on macOS arm64 / Linux arm64 (the robot). The
+# plan for #55 is explicitly an ONNX-only wake detector: we use
+# ``openwakeword.model.Model(inference_framework='onnx')`` and never
+# touch the tflite path. This override drops tflite-runtime from the
+# Requires-Dist while keeping the rest of openwakeword's dep graph
+# (onnxruntime, scipy, etc.) intact. Mirrors the gstreamer-libs override
+# pattern above. Tracked alongside #55.
 [tool.uv]
 dependency-metadata = [
     { name = "gstreamer-libs", requires-dist = ["gstreamer-msvc-runtime; sys_platform == 'win32'", "setuptools"] },
+    { name = "openwakeword", requires-dist = [
+        "onnxruntime <2,>=1.10.0",
+        "tqdm <5.0,>=4.0",
+        "scipy <2,>=1.3",
+        "scikit-learn <2,>=1",
+        "requests <3,>=2.0",
+    ] },
 ]
 
 # PEP 735 dependency groups — workspace-wide dev tools. Subpackages no longer
