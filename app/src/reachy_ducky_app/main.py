@@ -233,3 +233,40 @@ def main() -> None:
     stop = threading.Event()
     stop.set()  # immediate exit; dev-loop only
     app.run(reachy_mini=None, stop_event=stop)
+
+
+def live_main() -> None:
+    """Mac-side live dev entry — connects to a real Reachy Mini over LAN.
+
+    Constructs a live ``ReachyMini()`` (which connects to the robot's
+    on-board daemon at ``reachy-mini.local:8000`` over WebRTC) and runs
+    ``ReachyDuckyApp`` until SIGINT (Ctrl-C). Lets you exercise the full
+    say-wake-word → run-a-turn flow from a dev Mac without installing
+    the app on the robot.
+
+    Prereqs (per CLAUDE.md):
+      1. ``uv run reachy-ducky init`` has populated ``~/.reachy-ducky/``
+      2. Brain daemon is running on the Mac (``uv run reachy-ducky-daemon``
+         in another terminal)
+      3. Reachy Mini Wireless is on the LAN
+    """
+    import signal
+
+    import reachy_mini  # type: ignore[import-untyped]
+
+    stop = threading.Event()
+
+    def _on_sigint(_signum: int, _frame: object) -> None:
+        # Ctrl-C cleanly drains the loop. Re-raises if pressed twice.
+        if stop.is_set():
+            raise KeyboardInterrupt
+        stop.set()
+
+    signal.signal(signal.SIGINT, _on_sigint)
+
+    print("reachy-ducky-app — live mode. Connecting to Reachy Mini…", flush=True)
+    with reachy_mini.ReachyMini() as mini:
+        print("Connected. Say 'hey jarvis' to start a turn. Ctrl-C to quit.", flush=True)
+        app = ReachyDuckyApp()
+        app.run(reachy_mini=mini, stop_event=stop)
+    print("Stopped.", flush=True)
