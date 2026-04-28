@@ -221,6 +221,82 @@ def test_owd_factory_passes_vendored_paths_to_oww_model(
     assert embedding_path.endswith("embedding_model.onnx")
 
 
+def test_owd_factory_attaches_vendored_vad_when_threshold_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vendored silero_vad path must reach the VAD class when vad_threshold > 0.
+
+    Guards against #79 review (Codex P1): ``openwakeword.Model.__init__``
+    constructs ``openwakeword.VAD()`` with no args when vad_threshold > 0,
+    which loads silero_vad.onnx from the package's resources dir —
+    empty on fresh installs. We work around this by constructing Model
+    with vad_threshold=0 (skipping auto-VAD) then attaching our own
+    VAD(model_path=vendored).
+    """
+    captured_model_kwargs: dict[str, object] = {}
+    captured_vad_path: list[str] = []
+
+    def _fake_model(**kwargs: object) -> FakeOWWModel:
+        captured_model_kwargs.update(kwargs)
+        return FakeOWWModel(scores={})
+
+    def _fake_vad(*, model_path: str, **_: object) -> object:
+        captured_vad_path.append(model_path)
+        return object()
+
+    import openwakeword.model  # noqa: PLC0415
+    import openwakeword.vad  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    monkeypatch.setattr(openwakeword.model, "Model", _fake_model)
+    monkeypatch.setattr(openwakeword.vad, "VAD", _fake_vad)
+
+    OpenWakeWordDetector.from_vendored_weights(vad_threshold=0.3)
+
+    # Model itself receives vad_threshold=0 so oWW skips auto-VAD construction
+    assert captured_model_kwargs.get("vad_threshold") == 0.0
+    # Our manual VAD attach used the vendored path
+    assert len(captured_vad_path) == 1
+    assert captured_vad_path[0].endswith("silero_vad.onnx")
+
+
+def test_owd_factory_skips_vad_attach_when_threshold_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``vad_threshold=0`` should skip the VAD attach entirely (no Silero load)."""
+    captured_vad_calls: list[str] = []
+
+    def _fake_model(**_: object) -> FakeOWWModel:
+        return FakeOWWModel(scores={})
+
+    def _fake_vad(*, model_path: str, **_: object) -> object:
+        captured_vad_calls.append(model_path)
+        return object()
+
+    import openwakeword.model  # noqa: PLC0415
+    import openwakeword.vad  # noqa: PLC0415
+
+    monkeypatch.setattr(openwakeword.model, "Model", _fake_model)
+    monkeypatch.setattr(openwakeword.vad, "VAD", _fake_vad)
+
+    OpenWakeWordDetector.from_vendored_weights(vad_threshold=0.0)
+
+    assert captured_vad_calls == []
+
+
+def test_owd_factory_raises_when_silero_vad_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pre-flight covers silero_vad.onnx alongside the other 3 vendored files."""
+    monkeypatch.delenv("REACHY_DUCKY_WAKE_MOCK", raising=False)
+    monkeypatch.setattr(
+        "reachy_ducky_app.wake_onnx._VENDORED_SILERO_VAD_PATH",
+        tmp_path / "nonexistent_silero.onnx",
+    )
+    with pytest.raises(RuntimeError, match="Vendored silero_vad model not found"):
+        OpenWakeWordDetector.from_vendored_weights()
+
+
 def test_owd_clips_resampled_overshoot_before_int16_cast() -> None:
     """FFT-resample overshoot beyond int16 must clip, not wrap.
 

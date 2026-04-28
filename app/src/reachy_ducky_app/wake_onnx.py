@@ -26,6 +26,7 @@ _VENDORED_WAKE_DIR: Path = Path(str(files("reachy_ducky_app.assets.wake")))
 _VENDORED_MODEL_PATH: Path = _VENDORED_WAKE_DIR / "hey_jarvis.onnx"
 _VENDORED_MELSPEC_PATH: Path = _VENDORED_WAKE_DIR / "melspectrogram.onnx"
 _VENDORED_EMBEDDING_PATH: Path = _VENDORED_WAKE_DIR / "embedding_model.onnx"
+_VENDORED_SILERO_VAD_PATH: Path = _VENDORED_WAKE_DIR / "silero_vad.onnx"
 
 
 class OpenWakeWordDetector(WakeDetector):
@@ -66,6 +67,7 @@ class OpenWakeWordDetector(WakeDetector):
             (_VENDORED_MODEL_PATH, "wake"),
             (_VENDORED_MELSPEC_PATH, "melspectrogram"),
             (_VENDORED_EMBEDDING_PATH, "embedding"),
+            (_VENDORED_SILERO_VAD_PATH, "silero_vad"),
         ):
             if not path.is_file():
                 msg = (
@@ -75,18 +77,30 @@ class OpenWakeWordDetector(WakeDetector):
                 )
                 raise RuntimeError(msg)
         from openwakeword.model import Model  # type: ignore[import-untyped]  # noqa: PLC0415
+        from openwakeword.vad import VAD  # type: ignore[import-untyped]  # noqa: PLC0415
 
         # Pass melspec / embedding paths via kwargs so ``AudioFeatures``
         # uses our vendored copies instead of looking for them inside
         # ``site-packages/openwakeword/resources/models/`` (which is
         # empty on fresh installs — openwakeword lazy-downloads them).
+        #
+        # We construct ``Model`` with ``vad_threshold=0`` (which skips
+        # ``openwakeword.VAD()`` auto-construction inside Model.__init__)
+        # then attach our own VAD pointing at the vendored silero model.
+        # Model.__init__ doesn't accept a VAD path kwarg (model.py:209-210
+        # calls ``openwakeword.VAD()`` with no args, defaulting to the
+        # package's empty resources/models dir on fresh installs); the
+        # post-construction attach is the path of least resistance.
         model = Model(
             wakeword_models=[str(_VENDORED_MODEL_PATH)],
-            vad_threshold=vad_threshold,
+            vad_threshold=0.0,
             inference_framework="onnx",
             melspec_model_path=str(_VENDORED_MELSPEC_PATH),
             embedding_model_path=str(_VENDORED_EMBEDDING_PATH),
         )
+        if vad_threshold > 0:
+            model.vad = VAD(model_path=str(_VENDORED_SILERO_VAD_PATH))
+            model.vad_threshold = vad_threshold
         return cls(model=model, threshold=threshold)
 
     def feed(self, frame: AudioFrame) -> None:
