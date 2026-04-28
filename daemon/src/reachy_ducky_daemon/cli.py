@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import subprocess  # nosec B404 — used only to invoke the `claude` CLI for an auth-status check; list-form, no shell, no user-controlled args
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,27 +160,7 @@ def _collect_daemon(existing_default_memory: Path) -> _DaemonConfig:
         typer.secho(f"  port {port_str!r} is not a number — using 8765.", fg=typer.colors.YELLOW)
         port = 8765
 
-    auth_token: str | None = None
-    raw = typer.prompt(
-        "Auth token (leave blank for no auth; safe on loopback)",
-        default="",
-        show_default=False,
-        hide_input=True,
-    )
-    if raw:
-        typer.secho(
-            "  Tip: for a strong token, run `openssl rand -hex 32` and paste the output.",
-            fg=typer.colors.YELLOW,
-        )
-        # Default no: the typical answer is "no, keep what I typed". We only
-        # prompt at all so the user sees the openssl hint.
-        if _confirm("  Regenerate with openssl instead?", default=False):
-            typer.echo(
-                "  OK — leaving auth_token unset for now. Run `openssl rand -hex 32` "
-                "and edit ~/.reachy-ducky/.env before starting the daemon."
-            )
-        else:
-            auth_token = raw
+    auth_token = _collect_auth_token(host=host)
 
     return _DaemonConfig(
         memory_root=memory_root,
@@ -187,6 +168,67 @@ def _collect_daemon(existing_default_memory: Path) -> _DaemonConfig:
         port=port,
         auth_token=auth_token,
     )
+
+
+def _collect_auth_token(*, host: str) -> str | None:
+    """Resolve the daemon auth token.
+
+    Default action is **auto-generate** — a 256-bit random hex string via
+    :func:`secrets.token_hex`, the cryptographic equivalent of
+    ``openssl rand -hex 32`` without the subprocess. Generate is the
+    primary path because there's no good reason to type a weaker custom
+    token, and the wizard previously buried this option behind a
+    confusing post-prompt offer.
+
+    The "skip" path is genuinely safe ONLY on loopback (``127.0.0.1``);
+    any other bind exposes an unauthenticated HTTP endpoint to the LAN.
+    The wizard prints an explicit warning when the user picks Skip with
+    a non-loopback bind.
+    """
+    typer.echo("Auth token — used by the on-robot app to authenticate to this daemon.")
+    choice = (
+        _ask(
+            "  [G]enerate (recommended), [P]aste your own, or [S]kip",
+            default="G",
+        )
+        .strip()
+        .lower()
+    )
+    if choice in {"", "g", "generate"}:
+        token = secrets.token_hex(32)
+        typer.secho(
+            "  Generated a 256-bit random auth token (saved to ~/.reachy-ducky/.env).",
+            fg=typer.colors.GREEN,
+        )
+        return token
+    if choice in {"p", "paste"}:
+        raw = str(
+            typer.prompt(
+                "  Paste auth token",
+                default="",
+                show_default=False,
+                hide_input=True,
+            )
+        ).strip()
+        if not raw:
+            typer.secho(
+                "  Empty token — skipping. (Re-run init to set one.)",
+                fg=typer.colors.YELLOW,
+            )
+            return None
+        return raw
+    # Skip
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        typer.secho(
+            f"  WARNING: skipping the auth token while bound to {host} exposes "
+            "the daemon to anyone on the LAN. Re-run init and pick Generate "
+            "before starting the daemon, or rebind to 127.0.0.1.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+    else:
+        typer.echo("  Skipped (safe on loopback).")
+    return None
 
 
 def _collect_github_pat() -> str | None:
@@ -203,6 +245,38 @@ def _collect_github_pat() -> str | None:
         hide_input=True,
     ).strip()
     return pat or None
+
+
+def _collect_openai_key() -> str | None:
+    """Prompt for OPENAI_API_KEY (required for the realtime voice path).
+
+    Skipping is allowed (handy for headless setups that wire the key via
+    a system-level env var or a secret manager), but ``reachy-ducky-app
+    -live`` will fail-fast at voice construction if neither this nor the
+    process environment provides one. The wizard prints a clear warning
+    when the user skips so the failure is anticipated, not surprising.
+    """
+    typer.secho("\nOpenAI API key", fg=typer.colors.CYAN, bold=True)
+    typer.echo(
+        "Required for the realtime voice (gpt-4o-realtime-preview). "
+        "Get one at https://platform.openai.com/api-keys."
+    )
+    key = str(
+        typer.prompt(
+            "OpenAI API key (leave blank to skip)",
+            default="",
+            show_default=False,
+            hide_input=True,
+        )
+    ).strip()
+    if not key:
+        typer.secho(
+            "  Skipped. The voice path will fail until OPENAI_API_KEY is set "
+            "in ~/.reachy-ducky/.env or the process env.",
+            fg=typer.colors.YELLOW,
+        )
+        return None
+    return key
 
 
 def _prompt_slug(*, taken: frozenset[str] = frozenset()) -> str:
@@ -377,6 +451,7 @@ def init() -> None:
     default_memory = cfg_dir / "memory"
     daemon = _collect_daemon(default_memory)
     pat = _collect_github_pat()
+    openai_key = _collect_openai_key()
     projects = _collect_projects()
 
     # --- write outputs ---
@@ -387,6 +462,8 @@ def init() -> None:
         env_entries["REACHY_DUCKY_AUTH_TOKEN"] = daemon.auth_token
     if pat:
         env_entries["GITHUB_PERSONAL_ACCESS_TOKEN"] = pat
+    if openai_key:
+        env_entries["OPENAI_API_KEY"] = openai_key
     if env_entries:
         _write_env(env_path, env_entries)
 

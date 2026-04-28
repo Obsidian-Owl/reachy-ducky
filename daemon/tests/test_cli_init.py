@@ -13,6 +13,7 @@ not-logged-in paths without touching the real CLI.
 
 from __future__ import annotations
 
+import re
 import stat
 import subprocess
 import sys
@@ -135,17 +136,17 @@ def test_happy_path_creates_config_env_and_memory(
     """Scripted answers produce a valid config.toml, .env, and memory tree."""
     fake_claude_auth(logged_in=True)
     # Order matches the wizard prompt sequence:
-    # 1. memory_root (accept default), 2. host default, 3. port default,
-    # 4. auth_token (empty), 5. GH PAT (empty),
-    # 6. project slug, 7. path, 8. github_repo (empty),
-    # 9. primary=y, 10. add another=n.
+    # 1. memory_root, 2. host, 3. port, 4. auth-token CHOICE (s=skip),
+    # 5. GH PAT, 6. OpenAI API key, 7. project slug, 8. path, 9. github_repo,
+    # 10. primary, 11. add another.
     script = "\n".join(
         [
             "",  # memory_root default
             "",  # host default
             "",  # port default
-            "",  # auth_token empty
+            "s",  # auth-token: skip
             "",  # GH PAT empty
+            "",  # OpenAI key empty
             "reachy-ducky",  # slug
             str(git_repo),  # path
             "",  # github_repo empty
@@ -173,7 +174,7 @@ def test_happy_path_creates_config_env_and_memory(
     assert (home / ".reachy-ducky" / "memory" / "ducky" / "soul.md").exists()
     assert (home / ".reachy-ducky" / "memory" / "projects").is_dir()
 
-    # No .env: no PAT, no auth token.
+    # No .env: no PAT, no auth token, no OpenAI key.
     assert not (home / ".reachy-ducky" / ".env").exists()
 
 
@@ -188,11 +189,12 @@ def test_happy_path_round_trips_through_app_config(
     fake_claude_auth(logged_in=True)
     script = "\n".join(
         [
-            "",
-            "",
-            "",
-            "",
-            "",
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
+            "",  # GH PAT
+            "",  # OpenAI key
             "my-proj",
             str(git_repo),
             "owner/my-proj",
@@ -250,11 +252,12 @@ def test_existing_config_overwrite_yes_replaces_file(
     script = "\n".join(
         [
             "y",  # overwrite yes
-            "",
-            "",
-            "",
-            "",
-            "",
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
+            "",  # GH PAT
+            "",  # OpenAI key
             "fresh-proj",
             str(git_repo),
             "",
@@ -284,11 +287,12 @@ def test_invalid_slug_reprompts_until_valid(
     fake_claude_auth(logged_in=True)
     script = "\n".join(
         [
-            "",
-            "",
-            "",
-            "",
-            "",
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
+            "",  # GH PAT
+            "",  # OpenAI key
             "Bad_Slug",  # rejected: underscore + uppercase
             "no spaces ok",  # rejected: space
             "good-slug",  # accepted
@@ -335,8 +339,9 @@ def test_init_wizard_rejects_duplicate_slug(
             "",  # memory default
             "",  # host default
             "",  # port default
-            "",  # no auth token
+            "s",  # auth-token: skip
             "",  # no PAT
+            "",  # no OpenAI key
             "alpha",  # project #1 slug
             str(git_repo),  # project #1 path
             "",  # no github_repo
@@ -375,11 +380,12 @@ def test_invalid_path_nonexistent_reprompts(
     nonexistent = tmp_path / "does" / "not" / "exist"
     script = "\n".join(
         [
-            "",
-            "",
-            "",
-            "",
-            "",
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
+            "",  # GH PAT
+            "",  # OpenAI key
             "good-slug",
             str(nonexistent),  # rejected
             str(git_repo),  # accepted
@@ -406,11 +412,12 @@ def test_invalid_path_not_a_git_repo_reprompts(
     not_a_repo.mkdir()
     script = "\n".join(
         [
-            "",
-            "",
-            "",
-            "",
-            "",
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
+            "",  # GH PAT
+            "",  # OpenAI key
             "good-slug",
             str(not_a_repo),  # rejected
             str(git_repo),  # accepted
@@ -434,11 +441,12 @@ def test_invalid_github_repo_reprompts_and_accepts_empty(
     fake_claude_auth(logged_in=True)
     script = "\n".join(
         [
-            "",
-            "",
-            "",
-            "",
-            "",
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
+            "",  # GH PAT
+            "",  # OpenAI key
             "proj",
             str(git_repo),
             "not-a-repo",  # rejected: no slash
@@ -472,11 +480,12 @@ def test_multiple_projects_only_first_primary(
     fake_claude_auth(logged_in=True)
     script = "\n".join(
         [
-            "",
-            "",
-            "",
-            "",
-            "",
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
+            "",  # GH PAT
+            "",  # OpenAI key
             "first-proj",
             str(git_repo),
             "",
@@ -512,11 +521,12 @@ def test_primary_swap_demotes_previous(
     fake_claude_auth(logged_in=True)
     script = "\n".join(
         [
-            "",
-            "",
-            "",
-            "",
-            "",
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
+            "",  # GH PAT
+            "",  # OpenAI key
             "first-proj",
             str(git_repo),
             "",
@@ -555,11 +565,12 @@ def test_claude_not_logged_in_warns_and_continues(
     fake_claude_auth(logged_in=False)
     script = "\n".join(
         [
-            "",
-            "",
-            "",
-            "",
-            "",
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
+            "",  # GH PAT
+            "",  # OpenAI key
             "proj",
             str(git_repo),
             "",
@@ -584,11 +595,12 @@ def test_claude_binary_missing_warns_and_continues(
     fake_claude_auth(missing=True)
     script = "\n".join(
         [
-            "",
-            "",
-            "",
-            "",
-            "",
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
+            "",  # GH PAT
+            "",  # OpenAI key
             "proj",
             str(git_repo),
             "",
@@ -617,11 +629,12 @@ def test_pat_writes_env_with_0600(
     pat = "ghp_" + "x" * 36
     script = "\n".join(
         [
-            "",
-            "",
-            "",
-            "",
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
             pat,  # GH PAT
+            "",  # OpenAI key
             "proj",
             str(git_repo),
             "",
@@ -653,17 +666,18 @@ def test_auth_token_writes_env_with_0600(
     git_repo: Path,
     fake_claude_auth: _ConfigureClaudeAuth,
 ) -> None:
-    """An auth_token is written to .env (not TOML) with 0600 perms."""
+    """A pasted auth_token is written to .env (not TOML) with 0600 perms."""
     fake_claude_auth(logged_in=True)
     token = "supersecrettoken123"
     script = "\n".join(
         [
-            "",
-            "",
-            "",
-            token,  # auth_token prompt
-            "n",  # decline the "generate a stronger one" offer
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "p",  # auth-token: paste
+            token,  # auth-token value
             "",  # no PAT
+            "",  # no OpenAI key
             "proj",
             str(git_repo),
             "",
@@ -688,6 +702,82 @@ def test_auth_token_writes_env_with_0600(
         assert mode == 0o600
 
 
+def test_auth_token_default_generate_writes_random_token(
+    home: Path,
+    git_repo: Path,
+    fake_claude_auth: _ConfigureClaudeAuth,
+) -> None:
+    """Hitting Enter on the auth-token choice generates a 256-bit random token.
+
+    Generate is the recommended primary path. The wizard previously
+    buried this behind a confusing post-prompt offer; the new flow
+    defaults to G so the secure choice is one Enter away.
+    """
+    fake_claude_auth(logged_in=True)
+    script = "\n".join(
+        [
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "",  # auth-token CHOICE — empty == default == G (generate)
+            "",  # no PAT
+            "",  # no OpenAI key
+            "proj",
+            str(git_repo),
+            "",
+            "y",
+            "n",
+            "",
+        ]
+    )
+    result = _invoke(script)
+    assert result.exit_code == 0, result.output
+    env = home / ".reachy-ducky" / ".env"
+    assert env.exists()
+    content = env.read_text()
+    # 64-hex-char token (32 bytes * 2).
+    match = re.search(r"^REACHY_DUCKY_AUTH_TOKEN=([0-9a-f]{64})$", content, re.MULTILINE)
+    assert match, f"expected 64-hex-char token in .env, got: {content!r}"
+
+
+def test_openai_key_writes_env_with_0600(
+    home: Path,
+    git_repo: Path,
+    fake_claude_auth: _ConfigureClaudeAuth,
+) -> None:
+    """OPENAI_API_KEY supplied to the wizard lands in .env with the other secrets."""
+    fake_claude_auth(logged_in=True)
+    key = "sk-test-" + "y" * 40
+    script = "\n".join(
+        [
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "s",  # auth-token: skip
+            "",  # no PAT
+            key,  # OpenAI key
+            "proj",
+            str(git_repo),
+            "",
+            "y",
+            "n",
+            "",
+        ]
+    )
+    result = _invoke(script)
+    assert result.exit_code == 0, result.output
+    env = home / ".reachy-ducky" / ".env"
+    assert env.exists()
+    content = env.read_text()
+    assert f"OPENAI_API_KEY={key}" in content
+    # TOML never contains the key.
+    cfg_text = (home / ".reachy-ducky" / "config.toml").read_text()
+    assert key not in cfg_text
+    if sys.platform != "win32":
+        mode = stat.S_IMODE(env.stat().st_mode)
+        assert mode == 0o600
+
+
 def test_no_pat_no_auth_token_no_env_file(
     home: Path,
     git_repo: Path,
@@ -700,8 +790,9 @@ def test_no_pat_no_auth_token_no_env_file(
             "",
             "",
             "",
-            "",  # no auth token
+            "s",  # auth-token: skip
             "",  # no PAT
+            "",  # no OpenAI key
             "proj",
             str(git_repo),
             "",

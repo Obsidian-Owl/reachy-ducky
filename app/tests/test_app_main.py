@@ -11,8 +11,10 @@ construction path via a fake ``reachy_mini_app`` stand-in.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from collections.abc import AsyncIterator
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
@@ -232,6 +234,40 @@ def test_main_exits_with_stopped_event(monkeypatch: pytest.MonkeyPatch) -> None:
     # it; belt-and-braces, the stop_event.set() inside main() guarantees the
     # loop body is skipped, so this returns synchronously.
     main()
+
+
+def test_load_dotenv_reads_key_value_lines_without_overwriting_existing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_load_dotenv`` parses KEY=VALUE lines, skips comments, no overwrite."""
+    from reachy_ducky_app.main import _load_dotenv
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# a comment\n"
+        "\n"
+        "OPENAI_API_KEY=sk-from-file\n"
+        'GITHUB_PERSONAL_ACCESS_TOKEN="ghp_quoted"\n'
+        "REACHY_DUCKY_AUTH_TOKEN=existing_should_not_overwrite\n"
+    )
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_PERSONAL_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("REACHY_DUCKY_AUTH_TOKEN", "process_env_wins")
+
+    loaded = _load_dotenv(env_file)
+    assert loaded == 2  # OpenAI + GH; auth-token already in env
+    assert os.environ["OPENAI_API_KEY"] == "sk-from-file"
+    assert os.environ["GITHUB_PERSONAL_ACCESS_TOKEN"] == "ghp_quoted"
+    assert os.environ["REACHY_DUCKY_AUTH_TOKEN"] == "process_env_wins"
+
+
+def test_load_dotenv_returns_zero_when_file_missing(tmp_path: Path) -> None:
+    """No .env file is fine — load_dotenv returns 0 silently."""
+    from reachy_ducky_app.main import _load_dotenv
+
+    assert _load_dotenv(tmp_path / "nonexistent.env") == 0
 
 
 async def test_run_async_closes_daemon_client_on_shutdown(

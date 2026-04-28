@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import threading
+from pathlib import Path
 
 from reachy_ducky_protocol.messages import State
 
@@ -235,6 +237,34 @@ def main() -> None:
     app.run(reachy_mini=None, stop_event=stop)
 
 
+def _load_dotenv(path: Path) -> int:
+    """Load ``KEY=VALUE`` lines from ``path`` into ``os.environ`` (no overwrite).
+
+    Returns the number of variables loaded. Existing env vars take
+    precedence — this matches every dotenv loader's expected semantics
+    and lets users override the on-disk file via the shell. Lines that
+    aren't ``KEY=VALUE`` (comments, blanks) are ignored. We don't pull
+    in ``python-dotenv`` because the format we write is trivial and the
+    extra dep is unjustified.
+    """
+    if not path.is_file():
+        return 0
+    loaded = 0
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+    return loaded
+
+
 def live_main() -> None:
     """Mac-side live dev entry — connects to a real Reachy Mini over LAN.
 
@@ -244,6 +274,9 @@ def live_main() -> None:
     say-wake-word → run-a-turn flow from a dev Mac without installing
     the app on the robot.
 
+    Auto-loads ``~/.reachy-ducky/.env`` (written by ``reachy-ducky init``)
+    so the user doesn't have to ``source`` it manually before each run.
+
     Prereqs (per CLAUDE.md):
       1. ``uv run reachy-ducky init`` has populated ``~/.reachy-ducky/``
       2. Brain daemon is running on the Mac (``uv run reachy-ducky-daemon``
@@ -251,13 +284,30 @@ def live_main() -> None:
       3. Reachy Mini Wireless is on the LAN
     """
     import signal
+    import sys
 
     import reachy_mini  # type: ignore[import-untyped]
+
+    env_path = Path.home() / ".reachy-ducky" / ".env"
+    loaded = _load_dotenv(env_path)
+    if loaded:
+        print(f"Loaded {loaded} env var(s) from {env_path}.", flush=True)
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        print(
+            "ERROR: OPENAI_API_KEY is not set.\n"
+            f"  Either add it to {env_path} (re-run `uv run reachy-ducky init` "
+            "and provide the key), or export it in your shell:\n"
+            "    export OPENAI_API_KEY=sk-...\n"
+            "  Get a key at https://platform.openai.com/api-keys.",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(2)
 
     stop = threading.Event()
 
     def _on_sigint(_signum: int, _frame: object) -> None:
-        # Ctrl-C cleanly drains the loop. Re-raises if pressed twice.
         if stop.is_set():
             raise KeyboardInterrupt
         stop.set()
@@ -268,5 +318,12 @@ def live_main() -> None:
     with reachy_mini.ReachyMini() as mini:
         print("Connected. Say 'hey jarvis' to start a turn. Ctrl-C to quit.", flush=True)
         app = ReachyDuckyApp()
-        app.run(reachy_mini=mini, stop_event=stop)
+        try:
+            app.run(reachy_mini=mini, stop_event=stop)
+        except ValueError as exc:
+            # Voice / brain construction errors that we want to surface
+            # without a stack trace (the user's already seen the failure
+            # path; the trace just buries the actual fix).
+            print(f"\nERROR: {exc}", file=sys.stderr, flush=True)
+            sys.exit(1)
     print("Stopped.", flush=True)
