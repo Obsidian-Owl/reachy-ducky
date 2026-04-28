@@ -220,3 +220,76 @@ async def test_wake_pump_exception_propagates_not_silently_swallowed(
 
     with pytest.raises(RuntimeError, match="simulated mic device error"):
         await app._run_async(reachy_mini=object(), stop_event=stop_event)
+
+
+@pytest.mark.asyncio
+async def test_wake_fire_while_muted_does_not_run_turn_or_clear_mute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guards against #79 review (Codex P1).
+
+    If wake.event fires while the state machine is MUTED (oWW false
+    positive on near-silent input is the realistic trigger), the loop
+    must NOT call sm.transition(State.LISTENING) — which would clear
+    the mute gate — and must NOT run a turn. Mute contract: once muted,
+    no turns until the user explicitly unmutes via the menubar/state
+    machine.
+    """
+    mic = _CountingMicSource()
+    wake = _FireOnceWake()
+    sm_transitions: list[State] = []
+    turn_calls: list[int] = []
+
+    monkeypatch.setattr("reachy_ducky_app.main.load_default_mic_source", lambda **_: mic)
+    monkeypatch.setattr("reachy_ducky_app.main.load_default_speaker_sink", lambda **_: object())
+    monkeypatch.setattr("reachy_ducky_app.main.load_default_wake_detector", lambda: wake)
+
+    class _FakeVoice:
+        def __init__(self, **_: Any) -> None: ...
+
+    monkeypatch.setattr("reachy_ducky_app.main.OpenAIRealtimeVoice", _FakeVoice)
+
+    fake_daemon = type(
+        "FakeDaemon",
+        (),
+        {
+            "from_env": classmethod(lambda cls: cls()),
+            "aclose": staticmethod(lambda: asyncio.sleep(0)),
+        },
+    )()
+    monkeypatch.setattr("reachy_ducky_app.main.DaemonClient", type(fake_daemon))
+
+    async def _fake_run_one_turn(**_: Any) -> None:
+        turn_calls.append(1)
+
+    monkeypatch.setattr("reachy_ducky_app.main.run_one_turn", _fake_run_one_turn)
+
+    # Force the state machine to report MUTED and capture transition attempts.
+    def _capture_transition(self: Any, target: State) -> None:
+        sm_transitions.append(target)
+
+    monkeypatch.setattr(EmbodimentStateMachine, "transition", _capture_transition)
+    # The state property is what the loop reads — pin it to MUTED.
+    monkeypatch.setattr(EmbodimentStateMachine, "state", property(lambda self: State.MUTED))
+
+    stop_event = threading.Event()
+    app = ReachyDuckyApp()
+
+    async def _stop_after_a_few_wake_fires() -> None:
+        # Give the loop time to fire wake at least twice (with backoff).
+        deadline = asyncio.get_event_loop().time() + 1.0
+        while wake.feed_calls < 5 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        stop_event.set()
+
+    asyncio.create_task(_stop_after_a_few_wake_fires())
+    await app._run_async(reachy_mini=object(), stop_event=stop_event)
+
+    # The contract: while muted, wake-fire must not run any turn.
+    assert turn_calls == [], "run_one_turn called despite MUTED — mute contract violated"
+    assert State.LISTENING not in sm_transitions, (
+        "transition(LISTENING) called while MUTED — would have cleared the mute gate"
+    )
+    # Wake DID fire and reset (proving we exercised the muted-fire path).
+    assert wake.reset_calls >= 1
+    assert wake.feed_calls >= 1

@@ -152,6 +152,18 @@ class ReachyDuckyApp:
                     continue
                 wake.event.clear()
 
+                # Respect the mute contract. ``MuteGate`` zeroes mic frames
+                # at the source, so the wake detector should rarely fire
+                # while muted — but oWW can hallucinate on near-silent
+                # input. If we're muted, do NOT transition out of MUTED
+                # (which would clear the mute gate via the state machine)
+                # and do NOT run a turn (``run_one_turn`` already guards
+                # this, but we'd have already corrupted the gate state by
+                # the time it checks). Loop back to Phase 1.
+                if sm.state == State.MUTED:
+                    await asyncio.sleep(_WAKE_PUMP_RESTART_BACKOFF_SECONDS)
+                    continue
+
                 # Phase 2 — turn. Wake confirmed; transition the embodiment
                 # state so the human gets the "I heard you" affordance, then
                 # let voice take exclusive mic ownership for the turn.
