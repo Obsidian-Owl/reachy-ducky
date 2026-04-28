@@ -43,6 +43,13 @@ from .wake import WakeDetector, load_default_wake_detector
 # pulling in ``janus`` / ``asyncio.to_thread`` plumbing we don't need yet.
 _STOP_BRIDGE_POLL_SECONDS = 0.1
 
+# Backoff between wake-pump restarts when the pump exits without firing
+# (e.g. mic source exhausted in unit tests). On hardware
+# ``ReachyMicSource.frames()`` is an infinite generator so this branch
+# never executes, but a degenerate mock source would otherwise tight-
+# loop the CPU.
+_WAKE_PUMP_RESTART_BACKOFF_SECONDS = 0.1
+
 
 class ReachyDuckyApp:
     """Entry point matching ``reachy_mini_app.ReachyMiniApp``'s shape.
@@ -113,7 +120,16 @@ class ReachyDuckyApp:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                 finally:
-                    if not pump_task.done():
+                    # Always retrieve pump_task's outcome, including when
+                    # already done. Without this, an exception raised
+                    # inside ``_run_wake_pump`` (mic device error, model
+                    # failure) is silently dropped — the loop would
+                    # restart a broken pump indefinitely while emitting
+                    # "Task exception was never retrieved" warnings.
+                    if pump_task.done():
+                        if not pump_task.cancelled():
+                            pump_task.result()  # raises if pump raised
+                    else:
                         pump_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await pump_task
@@ -128,8 +144,11 @@ class ReachyDuckyApp:
                 # ``MockMicSource`` yields nothing); in that case we loop
                 # back to Phase 1 without firing a turn. ``ReachyMicSource``
                 # never returns naturally, so on hardware the pump only
-                # exits via wake-fire or cancellation.
+                # exits via wake-fire or cancellation. Add a small backoff
+                # so degenerate sources (test mocks, transient SDK EOFs)
+                # don't tight-loop the CPU.
                 if not wake.event.is_set():
+                    await asyncio.sleep(_WAKE_PUMP_RESTART_BACKOFF_SECONDS)
                     continue
                 wake.event.clear()
 

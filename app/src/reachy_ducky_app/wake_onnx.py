@@ -16,9 +16,16 @@ from reachy_ducky_app.wake import WakeDetector
 _OWW_SAMPLE_RATE = 16_000
 _OWW_WINDOW_SAMPLES = 1280  # 80 ms @ 16 kHz — openWakeWord's expected chunk size
 
-# Resolved at import time so monkeypatch-replacing this module attr in
-# tests is straightforward.
-_VENDORED_MODEL_PATH: Path = Path(str(files("reachy_ducky_app.assets.wake") / "hey_jarvis.onnx"))
+# Resolved at import time so monkeypatch-replacing these module attrs in
+# tests is straightforward. ``openwakeword.utils.AudioFeatures`` defaults
+# the melspec / embedding paths to its package's ``resources/models/``
+# dir — which is empty on a fresh install (see #79 review). We must
+# pass our vendored copies through to ``Model()`` explicitly, not just
+# ``hey_jarvis.onnx``.
+_VENDORED_WAKE_DIR: Path = Path(str(files("reachy_ducky_app.assets.wake")))
+_VENDORED_MODEL_PATH: Path = _VENDORED_WAKE_DIR / "hey_jarvis.onnx"
+_VENDORED_MELSPEC_PATH: Path = _VENDORED_WAKE_DIR / "melspectrogram.onnx"
+_VENDORED_EMBEDDING_PATH: Path = _VENDORED_WAKE_DIR / "embedding_model.onnx"
 
 
 class OpenWakeWordDetector(WakeDetector):
@@ -55,19 +62,30 @@ class OpenWakeWordDetector(WakeDetector):
         vad_threshold: float = 0.3,
     ) -> OpenWakeWordDetector:
         """Construct using the vendored ONNX weights at install time."""
-        if not _VENDORED_MODEL_PATH.is_file():
-            msg = (
-                f"Wake model not found at {_VENDORED_MODEL_PATH}. Run "
-                "`uv sync` to install vendored weights, or set "
-                "REACHY_DUCKY_WAKE_MOCK=1 for the mock detector (tests only)."
-            )
-            raise RuntimeError(msg)
+        for path, name in (
+            (_VENDORED_MODEL_PATH, "wake"),
+            (_VENDORED_MELSPEC_PATH, "melspectrogram"),
+            (_VENDORED_EMBEDDING_PATH, "embedding"),
+        ):
+            if not path.is_file():
+                msg = (
+                    f"Vendored {name} model not found at {path}. Run "
+                    "`uv sync` to install vendored weights, or set "
+                    "REACHY_DUCKY_WAKE_MOCK=1 for the mock detector (tests only)."
+                )
+                raise RuntimeError(msg)
         from openwakeword.model import Model  # type: ignore[import-untyped]  # noqa: PLC0415
 
+        # Pass melspec / embedding paths via kwargs so ``AudioFeatures``
+        # uses our vendored copies instead of looking for them inside
+        # ``site-packages/openwakeword/resources/models/`` (which is
+        # empty on fresh installs — openwakeword lazy-downloads them).
         model = Model(
             wakeword_models=[str(_VENDORED_MODEL_PATH)],
             vad_threshold=vad_threshold,
             inference_framework="onnx",
+            melspec_model_path=str(_VENDORED_MELSPEC_PATH),
+            embedding_model_path=str(_VENDORED_EMBEDDING_PATH),
         )
         return cls(model=model, threshold=threshold)
 
@@ -79,7 +97,11 @@ class OpenWakeWordDetector(WakeDetector):
                 npt.NDArray[np.float32],
                 scipy.signal.resample(samples, new_len),
             )
-            samples = resampled.astype(np.int16)
+            # FFT-based resample can overshoot int16 range on sharp
+            # transients (e.g. consonants in "hey jarvis"). A naive
+            # ``.astype(np.int16)`` wraps modularly (float 32801 → int16
+            # -32735) which corrupts the wake input. Clip first.
+            samples = np.clip(resampled, -32768, 32767).astype(np.int16)
         self._buffer = np.concatenate((self._buffer, samples))
         while len(self._buffer) >= _OWW_WINDOW_SAMPLES:
             chunk = self._buffer[:_OWW_WINDOW_SAMPLES]

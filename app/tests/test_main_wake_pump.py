@@ -148,3 +148,75 @@ async def test_wake_pump_fires_then_yields_to_turn_then_restarts(
         )
     # State.LISTENING transition fires once per wake hit
     assert sm_transitions.count(State.LISTENING) >= 2
+
+
+class _RaisingMicSource:
+    """Mic source that raises a RuntimeError on second frames() entry.
+
+    Used to verify that a wake-pump exception is NOT silently swallowed.
+    First entry yields a few frames so the loop's first wake-fire path
+    can complete; second entry (after run_one_turn) raises.
+    """
+
+    def __init__(self) -> None:
+        self.entry_count = 0
+
+    async def frames(self) -> AsyncIterator[AudioFrame]:
+        self.entry_count += 1
+        if self.entry_count >= 2:
+            raise RuntimeError("simulated mic device error")
+        for _ in range(5):
+            yield (24_000, np.zeros(960, dtype=np.int16))
+            await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_wake_pump_exception_propagates_not_silently_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guards against #79 review (Augment medium / Codex P1).
+
+    If ``_run_wake_pump`` raises a non-CancelledError exception (mic
+    device error, model failure), the exception must propagate out of
+    ``_run_async`` instead of being silently dropped while the loop
+    tight-restarts a broken pump.
+    """
+    mic = _RaisingMicSource()
+    wake = MockWakeDetector(trigger_on_feed=True)
+
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_mic_source",
+        lambda **_: mic,
+    )
+    monkeypatch.setattr(
+        "reachy_ducky_app.main.load_default_speaker_sink",
+        lambda **_: object(),
+    )
+    monkeypatch.setattr("reachy_ducky_app.main.load_default_wake_detector", lambda: wake)
+
+    class _FakeVoice:
+        def __init__(self, **_: Any) -> None: ...
+
+    monkeypatch.setattr("reachy_ducky_app.main.OpenAIRealtimeVoice", _FakeVoice)
+
+    fake_daemon = type(
+        "FakeDaemon",
+        (),
+        {
+            "from_env": classmethod(lambda cls: cls()),
+            "aclose": staticmethod(lambda: asyncio.sleep(0)),
+        },
+    )()
+    monkeypatch.setattr("reachy_ducky_app.main.DaemonClient", type(fake_daemon))
+
+    async def _fake_run_one_turn(**_: Any) -> None:
+        return None
+
+    monkeypatch.setattr("reachy_ducky_app.main.run_one_turn", _fake_run_one_turn)
+    monkeypatch.setattr(EmbodimentStateMachine, "transition", lambda self, target: None)
+
+    stop_event = threading.Event()
+    app = ReachyDuckyApp()
+
+    with pytest.raises(RuntimeError, match="simulated mic device error"):
+        await app._run_async(reachy_mini=object(), stop_event=stop_event)
