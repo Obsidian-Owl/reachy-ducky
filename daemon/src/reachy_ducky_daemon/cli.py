@@ -213,10 +213,10 @@ def _collect_auth_token(*, host: str) -> str | None:
             ).strip()
             if not raw:
                 typer.secho(
-                    "  Empty token — skipping. (Re-run init to set one.)",
+                    "  Empty token — choose Paste again or Skip explicitly.",
                     fg=typer.colors.YELLOW,
                 )
-                return None
+                continue
             return raw
         if choice in {"s", "skip"}:
             if host not in {"127.0.0.1", "localhost", "::1"}:

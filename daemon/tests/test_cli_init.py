@@ -770,6 +770,38 @@ def test_auth_token_invalid_choice_reprompts_before_skip(
     assert not (home / ".reachy-ducky" / ".env").exists()
 
 
+def test_auth_token_empty_paste_reprompts_before_non_loopback_skip_warning(
+    home: Path,
+    git_repo: Path,
+    fake_claude_auth: _ConfigureClaudeAuth,
+) -> None:
+    """An empty pasted token must not silently skip auth on a LAN bind."""
+    fake_claude_auth(logged_in=True)
+    script = "\n".join(
+        [
+            "",  # memory_root
+            "0.0.0.0",  # host: non-loopback bind
+            "",  # port
+            "p",  # auth-token: paste
+            "",  # empty pasted token
+            "s",  # explicit skip after re-prompt
+            "",  # no PAT
+            "",  # no OpenAI key
+            "proj",
+            str(git_repo),
+            "",
+            "y",
+            "n",
+            "",
+        ]
+    )
+    result = _invoke(script)
+    assert result.exit_code == 0, result.output
+    assert "Empty token" in result.output
+    assert "WARNING: skipping the auth token while bound to 0.0.0.0" in result.output
+    assert not (home / ".reachy-ducky" / ".env").exists()
+
+
 def test_openai_key_writes_env_with_0600(
     home: Path,
     git_repo: Path,
