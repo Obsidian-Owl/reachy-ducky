@@ -18,6 +18,9 @@ dependencies = [
     "reachy-mini>=1.6.4,<2",
 ]
 
+[project.scripts]
+reachy-ducky-app-live = "reachy_ducky_app.main:live_main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

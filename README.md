@@ -5,24 +5,50 @@ Read-only desk robot that watches your agentic SWE workflow and talks with you.
 
 See `docs/plans/2026-04-21-reachy-ducky-design.md` for the full design.
 
-Status: Phase A MVP in progress.
+Status: alpha candidate in release hardening.
 
-## Run (Phase A)
+## Run (Alpha Candidate)
 
-- Mac daemon: `uv run reachy-ducky-daemon` (first run: `uv run reachy-ducky init`
-  to write `~/.reachy-ducky/config.toml` + `.env`).
-- Menu-bar (macOS-only in Phase A — `rumps` lives in the optional `macos`
-  extra): `uv run reachy-ducky-menubar`.
-- Reachy app: one-click install from the on-robot dashboard after publishing
-  via HF Spaces. The publish path is **unverified** in Phase A — see
-  `docs/testing/2026-04-21-phase-a-e2e-procedure.md` Known gaps §3. For
-  running the app locally during development, see `app/README.md`.
-- Wake-word detection is a no-op stub in Phase A (`MockWakeDetector`); saying
-  "Hey Ducky" does nothing today. The smoke procedure below shows how to
-  exercise a turn without wake.
+First-time setup:
+
+```bash
+uv sync --all-packages --group dev
+uv run reachy-ducky init
+```
+
+The setup wizard writes `~/.reachy-ducky/config.toml`, a 0600
+`~/.reachy-ducky/.env` secrets file, and the configured memory tree.
+
+Mac daemon:
+
+```bash
+set -a; source ~/.reachy-ducky/.env; set +a
+uv run reachy-ducky-daemon
+```
+
+Live hardware dev run from the Mac:
+
+```bash
+set -a; source ~/.reachy-ducky/.env; set +a
+DAEMON_AUTH_TOKEN="$REACHY_DUCKY_AUTH_TOKEN" uv run reachy-ducky-app-live
+```
+
+The live app connects to a LAN Reachy Mini and uses the Mac-side daemon for
+`/brain/query` turns. `reachy-ducky init` writes the daemon token as
+`REACHY_DUCKY_AUTH_TOKEN`; map it to `DAEMON_AUTH_TOKEN` for the app client.
+
+Robot dashboard install: publish the app Space, then install it from the
+Reachy dashboard. Walking that dashboard path on hardware is part of alpha
+release validation; do not assume it is complete from local runs alone.
+
+Alpha wake word: say `hey jarvis`. The alpha build uses vendored openWakeWord
+ONNX weights. Custom `hey ducky` wake-word support is deferred to #75.
+
+Optional menu-bar (macOS-only; `rumps` lives in the optional `macos` extra):
+`uv run reachy-ducky-menubar`.
 
 See `docs/testing/2026-04-21-phase-a-e2e-procedure.md` for the full end-to-end
-smoke procedure and known gaps.
+smoke procedure.
 
 ## Development
 
