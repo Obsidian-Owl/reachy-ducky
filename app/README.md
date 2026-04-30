@@ -23,9 +23,10 @@ The Reachy Mini side of the [Reachy Ducky project](https://github.com/Obsidian-O
 ## What it does
 
 On-demand conversational rubber-ducky companion for agentic SWE work.
-Say "Hey Ducky", ask a question, get an answer. The Mac-side daemon
-does the thinking (Claude Agent SDK with a project-scoped tool surface);
-this app handles voice I/O on the robot.
+For alpha, say `hey jarvis`, ask a question, get an answer. The alpha wake
+word uses vendored openWakeWord ONNX weights; custom `hey ducky` support is
+deferred to #75. The Mac-side daemon does the thinking (Claude Agent SDK with a
+project-scoped tool surface); this app handles voice I/O on the robot.
 
 ## Install
 
@@ -47,7 +48,7 @@ this app handles voice I/O on the robot.
 Split-brain: voice on the robot, thinking on the Mac.
 Full design: https://github.com/Obsidian-Owl/reachy-ducky/blob/main/docs/plans/2026-04-21-reachy-ducky-design.md
 
-Phase A scope: on-demand conversational mode only. Wake-word triggers
+Alpha scope: on-demand conversational mode only. Wake-word triggers
 a single turn; response speaks back. Listening / thinking state machine
 expresses body motion (head tilt, antenna animation) via the Reachy
 emotions library. Always-on passive observation (phase C) is deferred.
