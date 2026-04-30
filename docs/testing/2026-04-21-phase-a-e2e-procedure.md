@@ -150,11 +150,15 @@ set -a; source ~/.reachy-ducky/.env; set +a
 REACHY_DUCKY_DAEMON_HOST=0.0.0.0 uv run reachy-ducky-daemon
 
 # Terminal 2
-uv run reachy-ducky-app-live
+set -a; source ~/.reachy-ducky/.env; set +a
+DAEMON_AUTH_TOKEN="$REACHY_DUCKY_AUTH_TOKEN" uv run reachy-ducky-app-live
 ```
 
 Expected output / behavior:
 
+- Terminal 2 maps the daemon token from `REACHY_DUCKY_AUTH_TOKEN` to the app
+  client's `DAEMON_AUTH_TOKEN`; without that, `/brain/query` returns `401` when
+  auth is enabled.
 - Terminal 2 prints `Connected. Say 'hey jarvis' to start a turn.` after it
   connects to the LAN Reachy Mini.
 - Saying `hey jarvis` triggers wake detection and moves the app into the
@@ -243,7 +247,7 @@ draft. A follow-up issue should update the plan.
 |---|---|---|
 | Menu-bar shows `🦆⚠` "daemon unreachable" | Daemon not running, or bound to a different host/port than `http://127.0.0.1:8765` | Start the daemon; or edit `_DAEMON_URL_DEFAULT` in `menubar/src/reachy_ducky_menubar/main.py:24` - the menu-bar URL is not yet env-overridable. |
 | `curl /brain/query` returns `401 {"detail":"missing bearer token"}` | `REACHY_DUCKY_AUTH_TOKEN` is set on the daemon; your curl didn't send `Authorization: Bearer <token>` | Add the header, or unset the env var and restart the daemon. |
-| `curl /brain/query` returns `401 {"detail":"invalid bearer token"}` | Token mismatch between daemon and caller | Re-source `~/.reachy-ducky/.env` in both shells. |
+| `curl /brain/query` returns `401 {"detail":"invalid bearer token"}` | Token mismatch between daemon and caller | Re-source `~/.reachy-ducky/.env` in both shells; for the live app, map `DAEMON_AUTH_TOKEN="$REACHY_DUCKY_AUTH_TOKEN"`. |
 | `curl /brain/query` returns `400 {"detail":"no project_slug in request and no primary project configured"}` | Wizard was not run, or no `primary = true` project in `config.toml` | Re-run `uv run reachy-ducky init`, or edit `~/.reachy-ducky/config.toml`. |
 | `curl /brain/query` returns `404 {"detail":"unknown project: <slug>"}` | Slug in request body does not appear in the loaded project list | Check `/health`'s `projects` field; fix the slug or add the project. |
 | Daemon logs `ClaudeSDKError: not authenticated` (or similar) on first query | `claude login` never run on the Mac | Run `claude login`; re-run the query. |

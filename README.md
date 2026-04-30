@@ -29,11 +29,13 @@ uv run reachy-ducky-daemon
 Live hardware dev run from the Mac:
 
 ```bash
-uv run reachy-ducky-app-live
+set -a; source ~/.reachy-ducky/.env; set +a
+DAEMON_AUTH_TOKEN="$REACHY_DUCKY_AUTH_TOKEN" uv run reachy-ducky-app-live
 ```
 
-The live app loads `~/.reachy-ducky/.env`, connects to a LAN Reachy Mini, and
-uses the Mac-side daemon for `/brain/query` turns.
+The live app connects to a LAN Reachy Mini and uses the Mac-side daemon for
+`/brain/query` turns. `reachy-ducky init` writes the daemon token as
+`REACHY_DUCKY_AUTH_TOKEN`; map it to `DAEMON_AUTH_TOKEN` for the app client.
 
 Robot dashboard install: publish the app Space, then install it from the
 Reachy dashboard. Walking that dashboard path on hardware is part of alpha
