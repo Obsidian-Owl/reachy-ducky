@@ -186,49 +186,54 @@ def _collect_auth_token(*, host: str) -> str | None:
     a non-loopback bind.
     """
     typer.echo("Auth token — used by the on-robot app to authenticate to this daemon.")
-    choice = (
-        _ask(
-            "  [G]enerate (recommended), [P]aste your own, or [S]kip",
-            default="G",
-        )
-        .strip()
-        .lower()
-    )
-    if choice in {"", "g", "generate"}:
-        token = secrets.token_hex(32)
-        typer.secho(
-            "  Generated a 256-bit random auth token (saved to ~/.reachy-ducky/.env).",
-            fg=typer.colors.GREEN,
-        )
-        return token
-    if choice in {"p", "paste"}:
-        raw = str(
-            typer.prompt(
-                "  Paste auth token",
-                default="",
-                show_default=False,
-                hide_input=True,
+    while True:
+        choice = (
+            _ask(
+                "  [G]enerate (recommended), [P]aste your own, or [S]kip",
+                default="G",
             )
-        ).strip()
-        if not raw:
+            .strip()
+            .lower()
+        )
+        if choice in {"", "g", "generate"}:
+            token = secrets.token_hex(32)
             typer.secho(
-                "  Empty token — skipping. (Re-run init to set one.)",
-                fg=typer.colors.YELLOW,
+                "  Generated a 256-bit random auth token (saved to ~/.reachy-ducky/.env).",
+                fg=typer.colors.GREEN,
             )
+            return token
+        if choice in {"p", "paste"}:
+            raw = str(
+                typer.prompt(
+                    "  Paste auth token",
+                    default="",
+                    show_default=False,
+                    hide_input=True,
+                )
+            ).strip()
+            if not raw:
+                typer.secho(
+                    "  Empty token — skipping. (Re-run init to set one.)",
+                    fg=typer.colors.YELLOW,
+                )
+                return None
+            return raw
+        if choice in {"s", "skip"}:
+            if host not in {"127.0.0.1", "localhost", "::1"}:
+                typer.secho(
+                    f"  WARNING: skipping the auth token while bound to {host} exposes "
+                    "the daemon to anyone on the LAN. Re-run init and pick Generate "
+                    "before starting the daemon, or rebind to 127.0.0.1.",
+                    fg=typer.colors.RED,
+                    bold=True,
+                )
+            else:
+                typer.echo("  Skipped (safe on loopback).")
             return None
-        return raw
-    # Skip
-    if host not in {"127.0.0.1", "localhost", "::1"}:
         typer.secho(
-            f"  WARNING: skipping the auth token while bound to {host} exposes "
-            "the daemon to anyone on the LAN. Re-run init and pick Generate "
-            "before starting the daemon, or rebind to 127.0.0.1.",
-            fg=typer.colors.RED,
-            bold=True,
+            "  Unrecognized choice — enter G to generate, P to paste, or S to skip.",
+            fg=typer.colors.YELLOW,
         )
-    else:
-        typer.echo("  Skipped (safe on loopback).")
-    return None
 
 
 def _collect_github_pat() -> str | None:

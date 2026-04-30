@@ -265,6 +265,23 @@ def _load_dotenv(path: Path) -> int:
     return loaded
 
 
+def _mirror_daemon_auth_token() -> bool:
+    """Map daemon-side init token name to the app client's env contract.
+
+    ``reachy-ducky init`` writes ``REACHY_DUCKY_AUTH_TOKEN`` for the Mac
+    daemon. The robot-side/client code reads ``DAEMON_AUTH_TOKEN``. Live
+    mode runs both roles from the same Mac checkout, so mirror the value
+    after dotenv loading unless the caller already set the app-side name.
+    """
+    if os.environ.get("DAEMON_AUTH_TOKEN"):
+        return False
+    token = os.environ.get("REACHY_DUCKY_AUTH_TOKEN")
+    if not token:
+        return False
+    os.environ["DAEMON_AUTH_TOKEN"] = token
+    return True
+
+
 def live_main() -> None:
     """Mac-side live dev entry — connects to a real Reachy Mini over LAN.
 
@@ -292,6 +309,8 @@ def live_main() -> None:
     loaded = _load_dotenv(env_path)
     if loaded:
         print(f"Loaded {loaded} env var(s) from {env_path}.", flush=True)
+    if _mirror_daemon_auth_token():
+        print("Mapped REACHY_DUCKY_AUTH_TOKEN to DAEMON_AUTH_TOKEN for app requests.", flush=True)
 
     if not os.environ.get("OPENAI_API_KEY"):
         print(

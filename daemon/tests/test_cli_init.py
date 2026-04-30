@@ -740,6 +740,36 @@ def test_auth_token_default_generate_writes_random_token(
     assert match, f"expected 64-hex-char token in .env, got: {content!r}"
 
 
+def test_auth_token_invalid_choice_reprompts_before_skip(
+    home: Path,
+    git_repo: Path,
+    fake_claude_auth: _ConfigureClaudeAuth,
+) -> None:
+    """A typo at the auth-token menu must not silently choose Skip."""
+    fake_claude_auth(logged_in=True)
+    script = "\n".join(
+        [
+            "",  # memory_root
+            "",  # host
+            "",  # port
+            "x",  # invalid auth-token choice
+            "s",  # explicit skip after re-prompt
+            "",  # no PAT
+            "",  # no OpenAI key
+            "proj",
+            str(git_repo),
+            "",
+            "y",
+            "n",
+            "",
+        ]
+    )
+    result = _invoke(script)
+    assert result.exit_code == 0, result.output
+    assert "Unrecognized choice" in result.output
+    assert not (home / ".reachy-ducky" / ".env").exists()
+
+
 def test_openai_key_writes_env_with_0600(
     home: Path,
     git_repo: Path,

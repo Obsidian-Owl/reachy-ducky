@@ -50,7 +50,7 @@ wake-word support is deferred to #75.
 ### One-time first-run wizard
 
 ```bash
-cd /Users/dmccarthy/Projects/reachy-ducky
+cd /path/to/reachy-ducky
 uv sync --all-packages --group dev
 uv run reachy-ducky init
 ```
@@ -62,7 +62,7 @@ memory tree. At least one project is required; mark one as primary.
 ## 1. Start the daemon
 
 ```bash
-cd /Users/dmccarthy/Projects/reachy-ducky
+cd /path/to/reachy-ducky
 # Load secrets written by `reachy-ducky init`:
 set -a; source ~/.reachy-ducky/.env; set +a
 uv run reachy-ducky-daemon
@@ -141,7 +141,7 @@ Use this path before dashboard install. It validates the alpha live-mode app
 against a LAN Reachy Mini while running from the Mac checkout.
 
 ```bash
-cd /Users/dmccarthy/Projects/reachy-ducky
+cd /path/to/reachy-ducky
 uv sync --all-packages --group dev
 uv run reachy-ducky init
 

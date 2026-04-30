@@ -270,6 +270,32 @@ def test_load_dotenv_returns_zero_when_file_missing(tmp_path: Path) -> None:
     assert _load_dotenv(tmp_path / "nonexistent.env") == 0
 
 
+def test_mirror_daemon_auth_token_maps_init_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live mode bridges daemon init token name to the app client contract."""
+    from reachy_ducky_app.main import _mirror_daemon_auth_token
+
+    monkeypatch.delenv("DAEMON_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("REACHY_DUCKY_AUTH_TOKEN", "daemon-token")
+
+    assert _mirror_daemon_auth_token() is True
+    assert os.environ["DAEMON_AUTH_TOKEN"] == "daemon-token"
+
+
+def test_mirror_daemon_auth_token_preserves_explicit_app_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicitly exported app token wins over the daemon-side token."""
+    from reachy_ducky_app.main import _mirror_daemon_auth_token
+
+    monkeypatch.setenv("DAEMON_AUTH_TOKEN", "app-token")
+    monkeypatch.setenv("REACHY_DUCKY_AUTH_TOKEN", "daemon-token")
+
+    assert _mirror_daemon_auth_token() is False
+    assert os.environ["DAEMON_AUTH_TOKEN"] == "app-token"
+
+
 async def test_run_async_closes_daemon_client_on_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
