@@ -4,7 +4,7 @@ version = "0.0.1"
 requires-python = ">=3.12"
 dependencies = [
     "reachy-ducky-protocol",
-    "claude-agent-sdk>=0.1.60,<0.2",
+    "claude-agent-sdk>=0.2.110,<0.3",
     "fastapi>=0.115,<0.120",
     "uvicorn[standard]>=0.30,<0.35",
     "pydantic>=2.7,<3",
