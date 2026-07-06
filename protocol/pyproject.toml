@@ -2,7 +2,7 @@
 name = "reachy-ducky-protocol"
 version = "0.0.1"
 requires-python = ">=3.12"
-dependencies = ["pydantic>=2.7,<3"]
+dependencies = ["pydantic>=2.13.4,<3"]
 
 [build-system]
 requires = ["hatchling"]

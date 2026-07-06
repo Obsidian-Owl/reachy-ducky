@@ -5,7 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     "reachy-ducky-protocol",
     "fastrtc>=0.0.20,<0.2",
-    "onnxruntime>=1.18.0",
+    "onnxruntime>=1.27.0",
     "openai>=1.50,<2",
     "openwakeword>=0.6.0",
     "mediapipe>=0.10,<0.12",
